@@ -1,0 +1,81 @@
+﻿<div class="detector-container">
+  <div class="header">
+    <h1>ðŸ” Barcode Detector</h1>
+    <div class="status">
+      <span *ngIf="isModelLoading" class="loading">â³ Loading {{ useMockDetector ? 'Mock' : 'ONNX' }} model...</span>
+      <span *ngIf="modelLoaded && !isModelLoading" class="ready">âœ“ {{ useMockDetector ? 'Mock' : 'ONNX' }} Model ready</span>
+      <span *ngIf="error" class="error">âš  {{ error }}</span>
+    </div>
+  </div>
+
+  <div class="controls">
+    <div class="detector-toggle">
+      <label>
+        <input type="checkbox" [(ngModel)]="useMockDetector" (change)="toggleDetector()">
+        Use Mock Detector (Fallback if ONNX fails)
+      </label>
+    </div>
+    <button 
+      (click)="toggleCamera()" 
+      [disabled]="!modelLoaded || isModelLoading"
+      [class.stop]="isStreaming">
+      {{ isStreaming ? 'â¹ Stop Camera' : 'â–¶ Start Camera' }}
+    </button>
+  </div>
+
+  <div class="stats" *ngIf="isStreaming">
+    <div class="stat-item">
+      <span class="stat-label">FPS:</span>
+      <span class="stat-value">{{ fps }}</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">Detections:</span>
+      <span class="stat-value" [class.highlight]="detectionCount > 0">{{ detectionCount }}</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">Mode:</span>
+      <span class="stat-value small">{{ useMockDetector ? 'Mock' : 'ONNX' }}</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">Resolution:</span>
+      <span class="stat-value small">{{ currentResolution || '-' }}</span>
+    </div>
+  </div>
+
+  <div class="video-container">
+    <video 
+      #videoElement 
+      autoplay 
+      playsinline 
+      muted
+      [class.hidden]="!isStreaming">
+    </video>
+    <canvas 
+      #canvasElement
+      [class.hidden]="!isStreaming">
+    </canvas>
+    <div class="decoded-overlay" *ngIf="isStreaming && decodedText">
+      <div class="decoded-value">{{ decodedText }}</div>
+      <div class="decoded-meta">Format: {{ decodedFormat }}</div>
+    </div>
+    <div class="status-overlay" *ngIf="isStreaming && streamMessage">
+      {{ streamMessage }}
+    </div>
+    <div
+      class="roi-overlay"
+      [class.hidden]="!isStreaming"
+      style="--roi-top: 25%; --roi-right: 10%; --roi-bottom: 25%; --roi-left: 10%;"
+      aria-hidden="true">
+      <div class="mask top"></div>
+      <div class="mask bottom"></div>
+      <div class="mask left"></div>
+      <div class="mask right"></div>
+    </div>
+  </div>
+
+  <div class="info" *ngIf="!isStreaming && modelLoaded">
+    <p>ðŸ“± Click "Start Camera" to begin detecting barcodes</p>
+    <p>The detector will automatically identify and highlight barcodes in real-time</p>
+  </div>
+</div>
+

@@ -1,0 +1,11 @@
+# SSL Certificate Files
+*.pfx
+*.p12
+localhost.key
+localhost.crt
+localhost.csr
+
+# Keep the generation scripts
+!generate-cert.sh
+!generate-cert.ps1
+!README.md

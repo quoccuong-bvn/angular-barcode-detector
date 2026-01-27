@@ -1,0 +1,455 @@
+﻿import { Component, ElementRef, OnDestroy, OnInit, ViewChild } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
+import { OnnxDetectorService, Detection } from '../services/onnx-detector.service';
+import { BrowserMultiFormatReader } from '@zxing/browser';
+import { MockDetectorService } from '../services/mock-detector.service';
+
+@Component({
+  selector: 'app-barcode-detector',
+  standalone: true,
+  imports: [CommonModule, FormsModule],
+  templateUrl: './barcode-detector.component.html',
+  styleUrls: ['./barcode-detector.component.scss']
+})
+export class BarcodeDetectorComponent implements OnInit, OnDestroy {
+  @ViewChild('videoElement', { static: false }) videoElement!: ElementRef<HTMLVideoElement>;
+  @ViewChild('canvasElement', { static: false }) canvasElement!: ElementRef<HTMLCanvasElement>;
+
+  isStreaming = false;
+  isModelLoading = false;
+  modelLoaded = false;
+  error: string | null = null;
+  detectionCount = 0;
+  fps = 0;
+  currentResolution = '';
+  decodedText = '';
+  decodedFormat = '';
+  decodedHistory: { text: string; format: string; time: string }[] = [];
+  streamMessage = '';
+  private desiredStreamMessage = '';
+  private desiredStreamPriority = 0;
+  private streamMessageSince = 0;
+  private readonly streamMessageHoldMs = 1500;
+  useMockDetector = false; // Start with ONNX detector by default
+  private stream: MediaStream | null = null;
+  private animationFrameId: number | null = null;
+  private lastFrameTime = 0;
+  private frameCount = 0;
+  private fpsUpdateTime = 0;
+  private readonly debug = false;
+  private readonly decodeCooldownMs = 300;
+  private lastDecodeAt = 0;
+  private decodeInFlight = false;
+  private lastDecodedAt = 0;
+  private readonly decodedStaleMs = 4000;
+  private readonly zxingReader = new BrowserMultiFormatReader();
+  private readonly roi = {
+    top: 0.25,
+    right: 0.1,
+    bottom: 0.25,
+    left: 0.1
+  };
+
+  constructor(
+    private onnxDetectorService: OnnxDetectorService,
+    private mockDetectorService: MockDetectorService
+  ) {}
+
+  private debugLog(...args: any[]) {
+    if (this.debug) {
+      console.log(...args);
+    }
+  }
+
+  async ngOnInit() {
+    await this.loadModel();
+  }
+
+  ngOnDestroy() {
+    this.stopCamera();
+  }
+
+  private async loadModel() {
+    try {
+      this.isModelLoading = true;
+      this.error = null;
+
+      const detectorService = this.useMockDetector ? this.mockDetectorService : this.onnxDetectorService;
+
+      if (this.useMockDetector) {
+        // Mock detector doesn't need file path
+        await detectorService.loadModel('');
+      } else {
+        // Try different possible paths for the ONNX model
+        const possiblePaths = [
+          '/assets/models/yolotiny.onnx',
+          '/assets/yolotiny.onnx',
+          './assets/models/yolotiny.onnx',
+          './assets/yolotiny.onnx'
+        ];
+
+        let lastError: any = null;
+
+        for (const modelPath of possiblePaths) {
+          try {
+            this.debugLog(`Trying to load model from: ${modelPath}`);
+            await detectorService.loadModel(modelPath);
+            this.debugLog(`Successfully loaded model from: ${modelPath}`);
+            break;
+          } catch (pathError) {
+            console.warn(`Failed to load from ${modelPath}:`, pathError);
+            lastError = pathError;
+            // Continue to next path
+          }
+        }
+
+        if (!detectorService.isModelLoaded()) {
+          throw lastError || new Error('All model paths failed');
+        }
+      }
+
+      this.modelLoaded = true;
+      this.isModelLoading = false;
+    } catch (err) {
+      this.error = 'Failed to load model: ' + (err as Error).message;
+      this.isModelLoading = false;
+      console.error('Model loading error:', err);
+    }
+  }
+
+  async startCamera() {
+    try {
+      this.error = null;
+      if (this.isStreaming) {
+        this.stopCamera();
+      }
+      
+      // Request camera access with ideal constraints for barcode scanning
+      this.stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: 'environment',
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
+        },
+        audio: false
+      });
+
+      const video = this.videoElement.nativeElement;
+      video.srcObject = this.stream;
+
+      const videoTrack = this.stream.getVideoTracks()[0];
+      const capabilities = videoTrack?.getCapabilities?.() as any;
+      if (capabilities) {
+        const advanced: any = {};
+        if (capabilities.focusMode?.includes('continuous')) {
+          advanced.focusMode = 'continuous';
+        }
+        if (capabilities.exposureMode?.includes('continuous')) {
+          advanced.exposureMode = 'continuous';
+        }
+        if (capabilities.whiteBalanceMode?.includes('continuous')) {
+          advanced.whiteBalanceMode = 'continuous';
+        }
+
+        if (Object.keys(advanced).length > 0) {
+          try {
+            await videoTrack.applyConstraints({ advanced: [advanced] });
+          } catch (constraintError) {
+            console.warn('Failed to apply camera constraints:', constraintError);
+          }
+        }
+      }
+      
+      await new Promise((resolve) => {
+        video.onloadedmetadata = () => {
+          video.play();
+          resolve(true);
+        };
+      });
+
+      this.isStreaming = true;
+      this.currentResolution = `${video.videoWidth}x${video.videoHeight}`;
+      this.setupCanvas();
+      this.startDetection();
+    } catch (err) {
+      this.error = 'Failed to access camera: ' + (err as Error).message;
+      console.error(err);
+    }
+  }
+
+  stopCamera() {
+    if (this.animationFrameId) {
+      cancelAnimationFrame(this.animationFrameId);
+      this.animationFrameId = null;
+    }
+
+    if (this.stream) {
+      this.stream.getTracks().forEach(track => track.stop());
+      this.stream = null;
+    }
+
+    this.isStreaming = false;
+  }
+
+  private setupCanvas() {
+    const video = this.videoElement.nativeElement;
+    const canvas = this.canvasElement.nativeElement;
+    
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+  }
+
+  private startDetection() {
+    const detectFrame = async () => {
+      if (!this.isStreaming) return;
+
+      const video = this.videoElement.nativeElement;
+      const canvas = this.canvasElement.nativeElement;
+      const ctx = canvas.getContext('2d')!;
+
+      // Draw video frame to canvas
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      const roiX = Math.round(canvas.width * this.roi.left);
+      const roiY = Math.round(canvas.height * this.roi.top);
+      const roiWidth = Math.round(canvas.width * (1 - this.roi.left - this.roi.right));
+      const roiHeight = Math.round(canvas.height * (1 - this.roi.top - this.roi.bottom));
+
+      // Get image data for detection (ROI only)
+      const imageData = ctx.getImageData(roiX, roiY, roiWidth, roiHeight);
+
+      // Run detection
+      try {
+        const detectorService = this.useMockDetector ? this.mockDetectorService : this.onnxDetectorService;
+        const detections = await detectorService.detect(imageData);
+        const mappedDetections = detections.map((detection) => {
+          const [x, y, width, height] = detection.bbox;
+          return {
+            ...detection,
+            bbox: [x + roiX, y + roiY, width, height] as [number, number, number, number]
+          };
+        });
+        const visibleDetections = mappedDetections.filter((detection) => detection.confidence >= 0.3);
+        const topDetection = visibleDetections.length > 0
+          ? visibleDetections.reduce((best, current) => (current.confidence > best.confidence ? current : best))
+          : null;
+        const displayDetections = topDetection ? [topDetection] : [];
+        this.detectionCount = displayDetections.length;
+
+        await this.decodeBarcodes(canvas, displayDetections);
+        const now = performance.now();
+        if (this.decodedText && now - this.lastDecodedAt > this.decodedStaleMs) {
+          this.decodedText = '';
+          this.decodedFormat = '';
+        }
+        if (displayDetections.length === 0) {
+          this.desiredStreamMessage = 'No barcode detected';
+          this.desiredStreamPriority = 0;
+        } else if (!this.decodedText) {
+          this.desiredStreamMessage = 'Move closer to the barcode for better decoding';
+          this.desiredStreamPriority = 1;
+        } else {
+          this.desiredStreamMessage = '';
+          this.desiredStreamPriority = 2;
+        }
+        this.updateStreamMessage();
+
+        // Draw detections
+        this.drawDetections(ctx, displayDetections);
+        
+        if (displayDetections.length > 0 && this.frameCount % 30 === 0) {
+          this.debugLog(`ðŸ“Š Frame detection: ${displayDetections.length} barcodes`);
+        }
+      } catch (err) {
+        console.error('Detection error:', err);
+      }
+
+      // Update FPS
+      this.updateFPS();
+
+      // Continue detection loop
+      this.animationFrameId = requestAnimationFrame(detectFrame);
+    };
+
+    detectFrame();
+  }
+
+  private async decodeBarcodes(canvas: HTMLCanvasElement, detections: Detection[]) {
+    const now = performance.now();
+    if (this.decodeInFlight || detections.length === 0 || now - this.lastDecodeAt < this.decodeCooldownMs) {
+      return;
+    }
+
+    this.decodeInFlight = true;
+    this.lastDecodeAt = now;
+
+    const tempCanvas = document.createElement('canvas');
+    const tempCtx = tempCanvas.getContext('2d');
+    if (!tempCtx) {
+      this.decodeInFlight = false;
+      return;
+    }
+
+    try {
+      for (const detection of detections) {
+        const [x, y, width, height] = detection.bbox;
+        if (width < 10 || height < 10) continue;
+
+        tempCanvas.width = Math.max(1, Math.round(width));
+        tempCanvas.height = Math.max(1, Math.round(height));
+        tempCtx.clearRect(0, 0, tempCanvas.width, tempCanvas.height);
+        tempCtx.drawImage(canvas, x, y, width, height, 0, 0, tempCanvas.width, tempCanvas.height);
+
+        try {
+          const result = await this.zxingReader.decodeFromCanvas(tempCanvas);
+          this.applyDecodeResult(result);
+          break;
+        } catch (err) {
+          // Ignore decode failures for this region
+        }
+      }
+    } finally {
+      this.decodeInFlight = false;
+    }
+  }
+
+  private applyDecodeResult(result: any) {
+    const text = result.getText();
+    if (!text) return;
+    const format = String(result.getBarcodeFormat());
+    const time = new Date().toLocaleTimeString();
+
+    if (this.decodedHistory.length > 0 && this.decodedHistory[0].text === text) {
+      return;
+    }
+
+    this.decodedText = text;
+    this.decodedFormat = format;
+    this.decodedHistory = [{ text, format, time }, ...this.decodedHistory].slice(0, 5);
+    this.lastDecodedAt = performance.now();
+  }
+
+  private drawDetections(ctx: CanvasRenderingContext2D, detections: Detection[]) {
+    if (detections.length === 0) return;
+    
+    this.debugLog(`ðŸŽ¨ Drawing ${detections.length} detections`);
+    
+    detections.forEach((detection, index) => {
+      const [x, y, width, height] = detection.bbox;
+      
+      this.debugLog(`Drawing box ${index + 1}:`, { x: x.toFixed(1), y: y.toFixed(1), width: width.toFixed(1), height: height.toFixed(1) });
+      
+      // Draw bounding box with thick green line
+      ctx.strokeStyle = '#00FF00';
+      ctx.lineWidth = 4;
+      ctx.strokeRect(x, y, width, height);
+
+      // Draw confidence label
+      const label = `Barcode ${(detection.confidence * 100).toFixed(1)}%`;
+      ctx.font = 'bold 18px Arial';
+      
+      // Draw label background
+      const textMetrics = ctx.measureText(label);
+      ctx.fillStyle = 'rgba(0, 255, 0, 0.8)';
+      ctx.fillRect(x, Math.max(0, y - 28), textMetrics.width + 12, 28);
+      
+      // Draw label text
+      ctx.fillStyle = '#000000';
+      ctx.fillText(label, x + 6, Math.max(20, y - 8));
+      
+      // Draw corner markers for better visibility
+      const markerSize = 15;
+      ctx.strokeStyle = '#00FF00';
+      ctx.lineWidth = 3;
+      
+      // Top-left corner
+      ctx.beginPath();
+      ctx.moveTo(x, y + markerSize);
+      ctx.lineTo(x, y);
+      ctx.lineTo(x + markerSize, y);
+      ctx.stroke();
+      
+      // Top-right corner
+      ctx.beginPath();
+      ctx.moveTo(x + width - markerSize, y);
+      ctx.lineTo(x + width, y);
+      ctx.lineTo(x + width, y + markerSize);
+      ctx.stroke();
+      
+      // Bottom-left corner
+      ctx.beginPath();
+      ctx.moveTo(x, y + height - markerSize);
+      ctx.lineTo(x, y + height);
+      ctx.lineTo(x + markerSize, y + height);
+      ctx.stroke();
+      
+      // Bottom-right corner
+      ctx.beginPath();
+      ctx.moveTo(x + width - markerSize, y + height);
+      ctx.lineTo(x + width, y + height);
+      ctx.lineTo(x + width, y + height - markerSize);
+      ctx.stroke();
+    });
+  }
+
+  private updateStreamMessage() {
+    const now = performance.now();
+    const currentPriority = this.getMessagePriority(this.streamMessage);
+
+    if (this.desiredStreamMessage === this.streamMessage) {
+      this.streamMessageSince = 0;
+      return;
+    }
+
+    if (this.desiredStreamPriority >= currentPriority) {
+      this.streamMessage = this.desiredStreamMessage;
+      this.streamMessageSince = 0;
+      return;
+    }
+
+    if (this.streamMessageSince === 0) {
+      this.streamMessageSince = now;
+    }
+    if (now - this.streamMessageSince >= this.streamMessageHoldMs) {
+      this.streamMessage = this.desiredStreamMessage;
+      this.streamMessageSince = 0;
+    }
+  }
+
+  private getMessagePriority(message: string) {
+    if (message.startsWith('Move closer')) return 1;
+    if (message.startsWith('No barcode')) return 0;
+    return 2;
+  }
+
+  private updateFPS() {
+    const now = performance.now();
+    this.frameCount++;
+
+    if (now - this.fpsUpdateTime >= 1000) {
+      this.fps = Math.round(this.frameCount / ((now - this.fpsUpdateTime) / 1000));
+      this.frameCount = 0;
+      this.fpsUpdateTime = now;
+    }
+  }
+
+  toggleDetector() {
+    this.debugLog('Switching detector mode:', this.useMockDetector ? 'Mock' : 'ONNX');
+    // Reload model with new detector
+    this.modelLoaded = false;
+    this.loadModel();
+  }
+
+  toggleCamera() {
+    if (this.isStreaming) {
+      this.stopCamera();
+    } else {
+      this.startCamera();
+    }
+  }
+}
+
+
+
+
