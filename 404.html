@@ -6,9 +6,57 @@
   <base href="/angular-barcode-detector/">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" type="image/x-icon" href="favicon.ico">
+  <style>
+    body { margin: 0; background: #111; color: #eaeaea; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+    #boot-fallback {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      text-align: center;
+      background: #111;
+      color: #eaeaea;
+      z-index: 9999;
+      white-space: pre-wrap;
+    }
+  </style>
 <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica Neue,Arial,sans-serif;background-color:#1a1a1a;color:#fff}
 </style><link rel="stylesheet" href="styles-ZLSRZ3NR.css" media="print" onload="this.media='all'"><noscript><link rel="stylesheet" href="styles-ZLSRZ3NR.css"></noscript></head>
 <body>
+  <div id="boot-fallback">Loading app… If this message stays, the app failed to start.</div>
   <app-root></app-root>
+  <script>
+    (function () {
+      var fallback = document.getElementById('boot-fallback');
+      function setMessage(msg) {
+        if (!fallback) return;
+        fallback.textContent = msg;
+      }
+      function hideFallback() {
+        if (!fallback) return;
+        fallback.style.display = 'none';
+      }
+      window.addEventListener('error', function (e) {
+        var msg = 'JS error: ' + (e && e.message ? e.message : 'unknown');
+        if (e && e.filename) msg += '\n' + e.filename + ':' + e.lineno + ':' + e.colno;
+        setMessage(msg);
+      });
+      window.addEventListener('unhandledrejection', function (e) {
+        var reason = e && e.reason ? e.reason : 'unknown';
+        if (reason && reason.message) reason = reason.message;
+        setMessage('Unhandled rejection: ' + reason);
+      });
+      var check = function () {
+        var root = document.querySelector('app-root');
+        if (root && root.children && root.children.length > 0) {
+          hideFallback();
+        }
+      };
+      document.addEventListener('DOMContentLoaded', check);
+      setInterval(check, 500);
+    })();
+  </script>
 <script src="polyfills-FFHMD2TL.js" type="module"></script><script src="main-4I6Q2V4M.js" type="module"></script></body>
 </html>
