@@ -31,10 +31,6 @@
       <span class="stat-value" [class.highlight]="detectionCount > 0">{{ detectionCount }}</span>
     </div>
     <div class="stat-item">
-      <span class="stat-label">Mode:</span>
-      <span class="stat-value small">{{ useMockDetector ? 'Mock' : 'ONNX' }}</span>
-    </div>
-    <div class="stat-item">
       <span class="stat-label">Resolution:</span>
       <span class="stat-value small">{{ currentResolution || '-' }}</span>
     </div>
@@ -64,10 +60,11 @@
       [class.hidden]="!isStreaming"
       style="--roi-top: 25%; --roi-right: 20%; --roi-bottom: 25%; --roi-left: 20%;"
       aria-hidden="true">
-      <div class="mask top"></div>
-      <div class="mask bottom"></div>
-      <div class="mask left"></div>
-      <div class="mask right"></div>
+    </div>
+    <div class="center-crosshair" *ngIf="isStreaming" aria-hidden="true">
+      <div class="crosshair-line horizontal"></div>
+      <div class="crosshair-line vertical"></div>
+      <div class="crosshair-center"></div>
     </div>
   </div>
 

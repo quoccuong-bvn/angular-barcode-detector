@@ -124,12 +124,27 @@
   overflow: hidden;
   box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
 
-  video, canvas {
+  // Responsive aspect ratio
+  &::before {
+    content: '';
     display: block;
+    padding-bottom: 75%; // 4:3 aspect ratio for mobile
+  }
+
+  @media (min-width: 768px) {
+    &::before {
+      padding-bottom: 56.25%; // 16:9 aspect ratio for desktop
+    }
+  }
+
+  video, canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
     width: 100%;
-    height: auto;
-    position: relative;
-    z-index: 1;
+    height: 100%;
+    object-fit: cover;
+    display: block;
 
     &.hidden {
       display: none;
@@ -137,55 +152,22 @@
   }
 
   canvas {
-    position: absolute;
-    top: 0;
-    left: 0;
     z-index: 2;
   }
 
   .roi-overlay {
     position: absolute;
-    inset: 0;
+    top: var(--roi-top);
+    left: var(--roi-left);
+    right: var(--roi-right);
+    bottom: var(--roi-bottom);
     pointer-events: none;
     z-index: 3;
+    border: 1px solid #ff0000;
+    box-sizing: border-box;
 
     &.hidden {
       display: none;
-    }
-
-    .mask {
-      position: absolute;
-      background: rgba(0, 0, 0, 0.45);
-      backdrop-filter: blur(6px);
-      -webkit-backdrop-filter: blur(6px);
-    }
-
-    .top {
-      top: 0;
-      left: 0;
-      right: 0;
-      height: var(--roi-top);
-    }
-
-    .bottom {
-      bottom: 0;
-      left: 0;
-      right: 0;
-      height: var(--roi-bottom);
-    }
-
-    .left {
-      top: var(--roi-top);
-      bottom: var(--roi-bottom);
-      left: 0;
-      width: var(--roi-left);
-    }
-
-    .right {
-      top: var(--roi-top);
-      bottom: var(--roi-bottom);
-      right: 0;
-      width: var(--roi-right);
     }
   }
 }
@@ -248,22 +230,217 @@
   }
 }
 
-@media (max-width: 768px) {
-  .header h1 {
-    font-size: 1.5rem;
-  }
+// Center crosshair for barcode positioning
+.center-crosshair {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 5;
+  pointer-events: none;
+  width: 60px;
+  height: 60px;
 
-  .stats {
-    gap: 15px;
-    padding: 10px 20px;
+  .crosshair-line {
+    position: absolute;
+    background: rgba(255, 255, 255, 0.8);
+    box-shadow: 0 0 4px rgba(0, 0, 0, 0.5);
 
-    .stat-value {
-      font-size: 1.2rem;
+    &.horizontal {
+      top: 50%;
+      left: 10px;
+      right: 10px;
+      height: 2px;
+      transform: translateY(-50%);
+    }
+
+    &.vertical {
+      left: 50%;
+      top: 10px;
+      bottom: 10px;
+      width: 2px;
+      transform: translateX(-50%);
     }
   }
 
+  .crosshair-center {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 8px;
+    height: 8px;
+    background: rgba(255, 255, 255, 0.9);
+    border: 2px solid rgba(0, 0, 0, 0.7);
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    box-shadow: 0 0 6px rgba(0, 0, 0, 0.3);
+  }
+
+  // Animation for better visibility
+  @keyframes crosshair-pulse {
+    0%, 100% { opacity: 0.8; }
+    50% { opacity: 1; }
+  }
+
+  .crosshair-center {
+    animation: crosshair-pulse 2s ease-in-out infinite;
+  }
+}
+
+// Mobile responsive for crosshair
+@media (max-width: 768px) {
+  .center-crosshair {
+    width: 50px;
+    height: 50px;
+
+    .crosshair-line {
+      &.horizontal {
+        left: 8px;
+        right: 8px;
+        height: 1.5px;
+      }
+
+      &.vertical {
+        top: 8px;
+        bottom: 8px;
+        width: 1.5px;
+      }
+    }
+
+    .crosshair-center {
+      width: 6px;
+      height: 6px;
+    }
+  }
+}
+
+@media (max-width: 768px) {
+  .detector-container {
+    padding: 10px;
+  }
+
+  .header h1 {
+    font-size: 1.5rem;
+    margin-bottom: 8px;
+  }
+
+  .status {
+    font-size: 0.9rem;
+  }
+
+  .controls {
+    margin: 15px 0;
+
+    button {
+      min-width: 120px;
+      font-size: 1rem;
+      padding: 12px 20px;
+    }
+  }
+
+  .stats {
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 15px;
+    margin: 15px 0;
+
+    .stat-item {
+      flex-direction: row;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .stat-label {
+      font-size: 0.8rem;
+      color: #cccccc;
+    }
+
+    .stat-value {
+      font-size: 1.1rem;
+
+      &.small {
+        font-size: 0.9rem;
+      }
+    }
+  }
+
+  .video-container {
+    margin: 15px auto;
+    border-radius: 6px;
+
+    video, canvas {
+      border-radius: 6px;
+    }
+  }
+
+  .decoded-overlay {
+    top: 8px;
+    padding: 8px 12px;
+    border-radius: 4px;
+
+    .decoded-value {
+      font-size: 0.9rem;
+      font-weight: bold;
+    }
+
+    .decoded-meta {
+      font-size: 0.7rem;
+      margin-top: 2px;
+    }
+  }
+
+  .status-overlay {
+    font-size: 0.8rem;
+    padding: 6px 10px;
+    border-radius: 4px;
+  }
+
+  .info {
+    padding: 15px;
+    text-align: center;
+
+    p {
+      font-size: 0.9rem;
+      margin: 5px 0;
+    }
+  }
+}
+
+// Tablet styles (769px - 1024px)
+@media (min-width: 769px) and (max-width: 1024px) {
+  .detector-container {
+    padding: 15px;
+  }
+
+  .header h1 {
+    font-size: 1.8rem;
+  }
+
+  .stats {
+    gap: 20px;
+    padding: 12px 25px;
+
+    .stat-value {
+      font-size: 1.3rem;
+    }
+  }
+
+  .video-container {
+    max-width: 800px;
+  }
+}
+
+// Touch device optimizations
+@media (hover: none) and (pointer: coarse) {
   .controls button {
-    font-size: 1rem;
-    padding: 12px 24px;
+    min-height: 48px; // Minimum touch target size
+    font-size: 1.1rem;
+  }
+
+  .detector-toggle label {
+    min-height: 44px;
+    padding: 8px 0;
+    align-items: flex-start;
   }
 }

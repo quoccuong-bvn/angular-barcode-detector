@@ -1,4 +1,4 @@
-﻿import { Component, ElementRef, OnDestroy, OnInit, ViewChild } from '@angular/core';
+﻿import { Component, ElementRef, NgZone, OnDestroy, OnInit, ViewChild } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { OnnxDetectorService, Detection } from '../services/onnx-detector.service';
@@ -35,6 +35,9 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
   actualCameraFps = 0;
   private stream: MediaStream | null = null;
   private animationFrameId: number | null = null;
+  private detectionIntervalId: number | null = null;
+  private overlayCanvas: HTMLCanvasElement | null = null;
+  private currentDetections: Detection[] = [];
   private lastFrameTime = 0;
   private frameCount = 0;
   private fpsUpdateTime = 0;
@@ -42,7 +45,7 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
   private videoFrameCount = 0;
   private lastVideoFpsUpdate = 0;
   private readonly debug = false;
-  private readonly decodeCooldownMs = 300;
+  private readonly decodeCooldownMs = 0; // Removed cooldown since detection already has 300ms interval
   private lastDecodeAt = 0;
   private decodeInFlight = false;
   private lastDecodedAt = 0;
@@ -57,7 +60,8 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
 
   constructor(
     private onnxDetectorService: OnnxDetectorService,
-    private mockDetectorService: MockDetectorService
+    private mockDetectorService: MockDetectorService,
+    private ngZone: NgZone
   ) {}
 
   private debugLog(...args: any[]) {
@@ -186,7 +190,8 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
       this.fps = 0;
       
       this.setupCanvas();
-      this.startDetection();
+      this.startStreamRendering();
+      this.startDetectionLoop();
     } catch (err) {
       this.error = 'Failed to access camera: ' + (err as Error).message;
       console.error(err);
@@ -197,6 +202,11 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
     if (this.animationFrameId) {
       cancelAnimationFrame(this.animationFrameId);
       this.animationFrameId = null;
+    }
+
+    if (this.detectionIntervalId) {
+      clearInterval(this.detectionIntervalId);
+      this.detectionIntervalId = null;
     }
 
     if (this.stream) {
@@ -215,89 +225,131 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
     canvas.height = video.videoHeight;
   }
 
-  private startDetection() {
-    const detectFrame = async () => {
+  private startStreamRendering() {
+    let lastRenderTime = 0;
+    const targetFPS = 30;
+    const targetFrameTime = 1000 / targetFPS; // ~33.33ms for 30 FPS
+
+    const renderFrame = () => {
       if (!this.isStreaming) return;
+
+      const currentTime = performance.now();
+
+      // Check if enough time has passed for target FPS
+      if (currentTime - lastRenderTime < targetFrameTime) {
+        // Not enough time, skip this frame
+        this.animationFrameId = requestAnimationFrame(renderFrame);
+        return;
+      }
 
       const video = this.videoElement.nativeElement;
       const canvas = this.canvasElement.nativeElement;
-      const ctx = canvas.getContext('2d')!;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
 
-      // Draw video frame to canvas
+      // Draw video frame directly (no clear needed - drawImage overwrites)
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      const roiX = Math.round(canvas.width * this.roi.left);
-      const roiY = Math.round(canvas.height * this.roi.top);
-      const roiWidth = Math.round(canvas.width * (1 - this.roi.left - this.roi.right));
-      const roiHeight = Math.round(canvas.height * (1 - this.roi.top - this.roi.bottom));
-
-      // Get image data for detection (ROI only)
-      const imageData = ctx.getImageData(roiX, roiY, roiWidth, roiHeight);
-
-      // Run detection
-      try {
-        const detectorService = this.useMockDetector ? this.mockDetectorService : this.onnxDetectorService;
-        const detections = await detectorService.detect(imageData);
-        const mappedDetections = detections.map((detection) => {
-          const [x, y, width, height] = detection.bbox;
-          return {
-            ...detection,
-            bbox: [x + roiX, y + roiY, width, height] as [number, number, number, number]
-          };
-        });
-        const visibleDetections = mappedDetections.filter((detection) => detection.confidence >= 0.3);
-        const topDetection = visibleDetections.length > 0
-          ? visibleDetections.reduce((best, current) => (current.confidence > best.confidence ? current : best))
-          : null;
-        const displayDetections = topDetection ? [topDetection] : [];
-        this.detectionCount = displayDetections.length;
-
-        await this.decodeBarcodes(canvas, displayDetections);
-        const now = performance.now();
-        if (this.decodedText && now - this.lastDecodedAt > this.decodedStaleMs) {
-          this.decodedText = '';
-          this.decodedFormat = '';
-        }
-        if (displayDetections.length === 0) {
-          this.desiredStreamMessage = 'No barcode detected';
-          this.desiredStreamPriority = 0;
-        } else if (!this.decodedText) {
-          this.desiredStreamMessage = 'Move closer to the barcode for better decoding';
-          this.desiredStreamPriority = 1;
-        } else {
-          this.desiredStreamMessage = '';
-          this.desiredStreamPriority = 2;
-        }
-        this.updateStreamMessage();
-
-        // Draw detections
-        this.drawDetections(ctx, displayDetections);
-        
-        if (displayDetections.length > 0 && this.frameCount % 30 === 0) {
-          this.debugLog(`ðŸ“Š Frame detection: ${displayDetections.length} barcodes`);
-        }
-      } catch (err) {
-        console.error('Detection error:', err);
+      // Only redraw detections if they changed
+      if (this.detectionsChanged()) {
+        this.redrawDetectionOverlay(canvas);
+      }
+      
+      // Draw cached overlay (very fast - just one drawImage)
+      if (this.overlayCanvas) {
+        ctx.drawImage(this.overlayCanvas, 0, 0);
       }
 
-      // Update FPS
-      this.updateFPS();
+      // Update render time
+      lastRenderTime = currentTime;
 
-      // Continue detection loop
-      this.animationFrameId = requestAnimationFrame(detectFrame);
+      // Update FPS (run inside Angular zone for UI updates)
+      this.ngZone.run(() => {
+        this.updateFPS();
+      });
+
+      this.animationFrameId = requestAnimationFrame(renderFrame);
     };
 
-    detectFrame();
+    // Start render loop
+    this.animationFrameId = requestAnimationFrame(renderFrame);
+  }
+
+  private startDetectionLoop() {
+    // Run detection every 300ms
+    this.detectionIntervalId = setInterval(async () => {
+      if (!this.isStreaming) return;
+
+      await this.runDetectionCycle();
+    }, 300);
+  }
+
+  private async runDetectionCycle() {
+    const video = this.videoElement.nativeElement;
+    const canvas = this.canvasElement.nativeElement;
+    const ctx = canvas.getContext('2d')!;
+
+    const roiX = Math.round(canvas.width * this.roi.left);
+    const roiY = Math.round(canvas.height * this.roi.top);
+    const roiWidth = Math.round(canvas.width * (1 - this.roi.left - this.roi.right));
+    const roiHeight = Math.round(canvas.height * (1 - this.roi.top - this.roi.bottom));
+
+    // Get image data for detection (ROI only)
+    const imageData = ctx.getImageData(roiX, roiY, roiWidth, roiHeight);
+
+    // Run detection
+    try {
+      const detectorService = this.useMockDetector ? this.mockDetectorService : this.onnxDetectorService;
+      const detections = await detectorService.detect(imageData);
+      const mappedDetections = detections.map((detection) => {
+        const [x, y, width, height] = detection.bbox;
+        return {
+          ...detection,
+          bbox: [x + roiX, y + roiY, width, height] as [number, number, number, number]
+        };
+      });
+      const visibleDetections = mappedDetections.filter((detection) => detection.confidence >= 0.3);
+      const topDetection = visibleDetections.length > 0
+        ? visibleDetections.reduce((best, current) => (current.confidence > best.confidence ? current : best))
+        : null;
+      const displayDetections = topDetection ? [topDetection] : [];
+      this.detectionCount = displayDetections.length;
+
+      await this.decodeBarcodes(canvas, displayDetections);
+      const now = performance.now();
+      if (this.decodedText && now - this.lastDecodedAt > this.decodedStaleMs) {
+        this.decodedText = '';
+        this.decodedFormat = '';
+      }
+      if (displayDetections.length === 0) {
+        this.desiredStreamMessage = 'Please place barcode inside the red box';
+        this.desiredStreamPriority = 0;
+      } else if (!this.decodedText) {
+        this.desiredStreamMessage = 'Move closer to the barcode for better scanning';
+        this.desiredStreamPriority = 1;
+      } else {
+        this.desiredStreamMessage = '';
+        this.desiredStreamPriority = 2;
+      }
+      this.updateStreamMessage();
+
+      // Cache detection overlay for rendering loop
+      this.cacheDetectionOverlay(canvas, displayDetections);
+      
+      if (displayDetections.length > 0 && this.frameCount % 30 === 0) {
+        this.debugLog(`ðŸ“Š Frame detection: ${displayDetections.length} barcodes`);
+      }
+    } catch (err) {
+      console.error('Detection error:', err);
+    }
   }
 
   private async decodeBarcodes(canvas: HTMLCanvasElement, detections: Detection[]) {
-    const now = performance.now();
-    if (this.decodeInFlight || detections.length === 0 || now - this.lastDecodeAt < this.decodeCooldownMs) {
+    if (this.decodeInFlight || detections.length === 0) {
       return;
     }
 
     this.decodeInFlight = true;
-    this.lastDecodeAt = now;
+    this.lastDecodeAt = performance.now();
 
     const tempCanvas = document.createElement('canvas');
     const tempCtx = tempCanvas.getContext('2d');
@@ -468,33 +520,51 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
   }
 
   private updateCameraFPS() {
-    if (!this.isStreaming) return;
-
     const video = this.videoElement.nativeElement;
     const now = performance.now();
-
-    // Use requestVideoFrameCallback if available (most accurate)
-    if (video.requestVideoFrameCallback) {
-      video.requestVideoFrameCallback(() => {
-        this.videoFrameCount++;
-        if (now - this.lastVideoFpsUpdate >= 1000) {
-          this.actualCameraFps = Math.round(this.videoFrameCount / ((now - this.lastVideoFpsUpdate) / 1000));
-          this.videoFrameCount = 0;
-          this.lastVideoFpsUpdate = now;
-        }
-      });
-    } else {
-      // Fallback: check video.currentTime changes
-      if (video.currentTime !== this.lastVideoTime) {
-        this.lastVideoTime = video.currentTime;
-        this.videoFrameCount++;
-      }
-      if (now - this.lastVideoFpsUpdate >= 1000) {
-        this.actualCameraFps = Math.round(this.videoFrameCount / ((now - this.lastVideoFpsUpdate) / 1000));
-        this.videoFrameCount = 0;
-        this.lastVideoFpsUpdate = now;
-      }
+    
+    if (video.currentTime !== this.lastVideoTime) {
+      this.videoFrameCount++;
+      this.lastVideoTime = video.currentTime;
     }
+    
+    if (now - this.lastVideoFpsUpdate >= 1000) {
+      this.actualCameraFps = Math.round(this.videoFrameCount / ((now - this.lastVideoFpsUpdate) / 1000));
+      this.videoFrameCount = 0;
+      this.lastVideoFpsUpdate = now;
+    }
+  }
+
+  private detectionsChanged(): boolean {
+    // Simple check - in production you might want more sophisticated comparison
+    return true; // For now, always redraw to keep it simple
+  }
+
+  private redrawDetectionOverlay(canvas: HTMLCanvasElement) {
+    if (!this.overlayCanvas) return;
+    
+    const ctx = canvas.getContext('2d')!;
+    // Clear previous overlay area
+    // Draw cached overlay
+    ctx.drawImage(this.overlayCanvas, 0, 0);
+  }
+
+  private cacheDetectionOverlay(canvas: HTMLCanvasElement, detections: Detection[]) {
+    // Create or resize overlay canvas
+    if (!this.overlayCanvas) {
+      this.overlayCanvas = document.createElement('canvas');
+    }
+    this.overlayCanvas.width = canvas.width;
+    this.overlayCanvas.height = canvas.height;
+    
+    const overlayCtx = this.overlayCanvas.getContext('2d')!;
+    // Clear overlay
+    overlayCtx.clearRect(0, 0, this.overlayCanvas.width, this.overlayCanvas.height);
+    
+    // Draw detections to overlay
+    this.drawDetections(overlayCtx, detections);
+    
+    this.currentDetections = detections;
   }
 
   toggleDetector() {

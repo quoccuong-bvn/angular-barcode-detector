@@ -28,11 +28,46 @@ export class OnnxDetectorService {
   constructor() {
     // Configure ONNX Runtime to load WASM files from assets
     ort.env.wasm.wasmPaths = '/assets/wasm/';
-    ort.env.wasm.numThreads = 4;
+    
+    // Optimize thread count based on device capabilities
+    const optimalThreads = this.getOptimalThreadCount();
+    ort.env.wasm.numThreads = optimalThreads;
+    
     ort.env.wasm.simd = true; // Prefer SIMD when supported
     ort.env.wasm.proxy = false; // Disable proxy to load from local assets
 
     this.debugLog('ONNX Runtime configured with WASM path:', ort.env.wasm.wasmPaths);
+    this.debugLog('Optimal thread count for this device:', optimalThreads);
+  }
+
+  private getOptimalThreadCount(): number {
+    const hardwareConcurrency = navigator.hardwareConcurrency || 4;
+    
+    // Detect if this is a mobile device
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+                    (window.innerWidth <= 768 && window.innerHeight > window.innerWidth);
+    
+    // Detect if this is a touch device (likely mobile/tablet)
+    const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    
+    let optimalThreads: number;
+    
+    if (isMobile || isTouchDevice) {
+      // Mobile devices: use minimal threads to save battery and avoid overhead
+      optimalThreads = Math.min(2, Math.max(1, Math.floor(hardwareConcurrency / 2)));
+    } else {
+      // Desktop: can use more threads
+      optimalThreads = Math.min(4, Math.max(2, Math.floor(hardwareConcurrency / 2)));
+    }
+    
+    this.debugLog('Device detection:', { 
+      hardwareConcurrency, 
+      isMobile, 
+      isTouchDevice, 
+      optimalThreads 
+    });
+    
+    return optimalThreads;
   }
 
   private debugLog(...args: any[]) {
