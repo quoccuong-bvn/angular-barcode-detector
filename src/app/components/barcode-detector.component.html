@@ -9,12 +9,6 @@
   </div>
 
   <div class="controls">
-    <div class="detector-toggle">
-      <label>
-        <input type="checkbox" [(ngModel)]="useMockDetector" (change)="toggleDetector()">
-        Use Mock Detector (Fallback if ONNX fails)
-      </label>
-    </div>
     <button 
       (click)="toggleCamera()" 
       [disabled]="!modelLoaded || isModelLoading"
@@ -25,7 +19,11 @@
 
   <div class="stats" *ngIf="isStreaming">
     <div class="stat-item">
-      <span class="stat-label">FPS:</span>
+      <span class="stat-label">Camera FPS:</span>
+      <span class="stat-value">{{ actualCameraFps }}</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">Render FPS:</span>
       <span class="stat-value">{{ fps }}</span>
     </div>
     <div class="stat-item">
@@ -64,7 +62,7 @@
     <div
       class="roi-overlay"
       [class.hidden]="!isStreaming"
-      style="--roi-top: 25%; --roi-right: 10%; --roi-bottom: 25%; --roi-left: 10%;"
+      style="--roi-top: 25%; --roi-right: 20%; --roi-bottom: 25%; --roi-left: 20%;"
       aria-hidden="true">
       <div class="mask top"></div>
       <div class="mask bottom"></div>

@@ -32,11 +32,15 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
   private streamMessageSince = 0;
   private readonly streamMessageHoldMs = 1500;
   useMockDetector = false; // Start with ONNX detector by default
+  actualCameraFps = 0;
   private stream: MediaStream | null = null;
   private animationFrameId: number | null = null;
   private lastFrameTime = 0;
   private frameCount = 0;
   private fpsUpdateTime = 0;
+  private lastVideoTime = 0;
+  private videoFrameCount = 0;
+  private lastVideoFpsUpdate = 0;
   private readonly debug = false;
   private readonly decodeCooldownMs = 300;
   private lastDecodeAt = 0;
@@ -46,9 +50,9 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
   private readonly zxingReader = new BrowserMultiFormatReader();
   private readonly roi = {
     top: 0.25,
-    right: 0.1,
+    right: 0.2,
     bottom: 0.25,
-    left: 0.1
+    left: 0.2
   };
 
   constructor(
@@ -81,12 +85,12 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
         // Mock detector doesn't need file path
         await detectorService.loadModel('');
       } else {
-        // Try different possible paths for the ONNX model
+        // Try different possible paths for the ORT model
         const possiblePaths = [
-          '/assets/models/yolotiny.onnx',
-          '/assets/yolotiny.onnx',
-          './assets/models/yolotiny.onnx',
-          './assets/yolotiny.onnx'
+          '/assets/models/yolotiny.ort',
+          '/assets/yolotiny.ort',
+          './assets/models/yolotiny.ort',
+          './assets/yolotiny.ort'
         ];
 
         let lastError: any = null;
@@ -130,7 +134,8 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
         video: {
           facingMode: 'environment',
           width: { ideal: 1920 },
-          height: { ideal: 1080 }
+          height: { ideal: 1080 },
+          frameRate: { ideal: 30, max: 30 }
         },
         audio: false
       });
@@ -170,6 +175,16 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
 
       this.isStreaming = true;
       this.currentResolution = `${video.videoWidth}x${video.videoHeight}`;
+      
+      // Initialize FPS tracking
+      this.lastVideoTime = 0;
+      this.videoFrameCount = 0;
+      this.lastVideoFpsUpdate = performance.now();
+      this.actualCameraFps = 0;
+      this.frameCount = 0;
+      this.fpsUpdateTime = performance.now();
+      this.fps = 0;
+      
       this.setupCanvas();
       this.startDetection();
     } catch (err) {
@@ -423,14 +438,62 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
     return 2;
   }
 
+  private startFPSOnlyLoop() {
+    const fpsFrame = () => {
+      if (!this.isStreaming) return;
+
+      // Update FPS (both render and camera)
+      this.updateFPS();
+
+      // Continue FPS-only loop
+      this.animationFrameId = requestAnimationFrame(fpsFrame);
+    };
+
+    fpsFrame();
+  }
+
   private updateFPS() {
     const now = performance.now();
     this.frameCount++;
 
+    // Update render/detection FPS
     if (now - this.fpsUpdateTime >= 1000) {
       this.fps = Math.round(this.frameCount / ((now - this.fpsUpdateTime) / 1000));
       this.frameCount = 0;
       this.fpsUpdateTime = now;
+    }
+
+    // Update actual camera FPS
+    this.updateCameraFPS();
+  }
+
+  private updateCameraFPS() {
+    if (!this.isStreaming) return;
+
+    const video = this.videoElement.nativeElement;
+    const now = performance.now();
+
+    // Use requestVideoFrameCallback if available (most accurate)
+    if (video.requestVideoFrameCallback) {
+      video.requestVideoFrameCallback(() => {
+        this.videoFrameCount++;
+        if (now - this.lastVideoFpsUpdate >= 1000) {
+          this.actualCameraFps = Math.round(this.videoFrameCount / ((now - this.lastVideoFpsUpdate) / 1000));
+          this.videoFrameCount = 0;
+          this.lastVideoFpsUpdate = now;
+        }
+      });
+    } else {
+      // Fallback: check video.currentTime changes
+      if (video.currentTime !== this.lastVideoTime) {
+        this.lastVideoTime = video.currentTime;
+        this.videoFrameCount++;
+      }
+      if (now - this.lastVideoFpsUpdate >= 1000) {
+        this.actualCameraFps = Math.round(this.videoFrameCount / ((now - this.lastVideoFpsUpdate) / 1000));
+        this.videoFrameCount = 0;
+        this.lastVideoFpsUpdate = now;
+      }
     }
   }
 

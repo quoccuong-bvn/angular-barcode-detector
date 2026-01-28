@@ -20,7 +20,7 @@ interface PreprocessResult {
 export class OnnxDetectorService {
   private session: ort.InferenceSession | null = null;
   private modelLoaded = false;
-  private readonly inputSize = 384; // YOLOv8 Tiny expects 384x384 input
+  private readonly inputSize = 224; // YOLOv8 Tiny ORT model expects 224x224 input
   private readonly confThreshold = 0.1; // Lowered from 0.25 to detect more
   private readonly iouThreshold = 0.45;
   private readonly debug = false;
@@ -31,7 +31,7 @@ export class OnnxDetectorService {
     ort.env.wasm.numThreads = 4;
     ort.env.wasm.simd = true; // Prefer SIMD when supported
     ort.env.wasm.proxy = false; // Disable proxy to load from local assets
-    
+
     this.debugLog('ONNX Runtime configured with WASM path:', ort.env.wasm.wasmPaths);
   }
 
@@ -43,7 +43,7 @@ export class OnnxDetectorService {
 
   async loadModel(modelPath: string): Promise<void> {
     try {
-      this.debugLog('Loading ONNX model from:', modelPath);
+      this.debugLog('Loading ORT model from:', modelPath);
       this.debugLog('ONNX Runtime version:', ort.env.versions);
 
       // Try WebGL first (better performance), fallback to WASM
