@@ -19,6 +19,7 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
   isStreaming = false;
   isModelLoading = false;
   modelLoaded = false;
+
   error: string | null = null;
   detectionCount = 0;
   fps = 0;
@@ -57,6 +58,13 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
     bottom: 0.25,
     left: 0.2
   };
+  preprocessEnabled = true;
+  cameraResolution = 'fhd';
+  readonly cameraResolutionOptions = [
+    { value: 'fhd', label: 'Full HD (1920x1080)' },
+    { value: 'hd', label: 'HD (1280x720)' },
+    { value: 'auto', label: 'Auto (device default)' }
+  ];
 
   constructor(
     private onnxDetectorService: OnnxDetectorService,
@@ -64,11 +72,27 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
     private ngZone: NgZone
   ) {}
 
+  private getBasePath(): string {
+    // Get base path from document baseURI or use default
+    const base = document.baseURI || window.location.href;
+    const url = new URL(base);
+    const pathname = url.pathname;
+    
+    // If pathname ends with / or is just /, return it
+    if (pathname === '/' || pathname.endsWith('/')) {
+      return pathname;
+    }
+    
+    // Otherwise return with trailing slash
+    return pathname + '/';
+  }
+
   private debugLog(...args: any[]) {
     if (this.debug) {
       console.log(...args);
     }
   }
+
 
   async ngOnInit() {
     await this.loadModel();
@@ -89,41 +113,194 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
         // Mock detector doesn't need file path
         await detectorService.loadModel('');
       } else {
+        // Get base path (handles baseHref in production)
+        const basePath = this.getBasePath();
+        this.debugLog('Base path:', basePath);
+        
+        const modelVersion = '2026-01-28-1';
+
         // Try different possible paths for the ORT model
         const possiblePaths = [
-          '/assets/models/yolotiny.ort',
-          '/assets/yolotiny.ort',
-          './assets/models/yolotiny.ort',
-          './assets/yolotiny.ort'
+          `${basePath}assets/models/yolotiny.ort?v=${modelVersion}`,
+          `${basePath}assets/models/yolotiny.onnx?v=${modelVersion}`,
+          `${basePath}assets/yolotiny.ort?v=${modelVersion}`,
+          `${basePath}assets/yolotiny.onnx?v=${modelVersion}`,
+          `/assets/models/yolotiny.ort?v=${modelVersion}`, // Fallback for dev
+          `/assets/yolotiny.ort?v=${modelVersion}`
         ];
 
         let lastError: any = null;
+        let pathsAttempted = 0;
+        let candidatePaths = possiblePaths;
 
-        for (const modelPath of possiblePaths) {
+        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+        if (isIOS) {
+          const seen = new Set<string>();
+          const probeCandidates: string[] = [];
+          for (const path of possiblePaths) {
+            const absolute = new URL(path, window.location.href).toString();
+            if (!seen.has(absolute)) {
+              seen.add(absolute);
+              probeCandidates.push(absolute);
+            }
+            if (absolute.includes('?')) {
+              const noQuery = absolute.split('?')[0];
+              if (!seen.has(noQuery)) {
+                seen.add(noQuery);
+                probeCandidates.push(noQuery);
+              }
+            }
+          }
+
+          let selectedUrl: string | null = null;
+          for (const url of probeCandidates) {
+            try {
+              const response = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+              if (response.ok) {
+                selectedUrl = url;
+                break;
+              }
+            } catch (probeError) {
+            }
+          }
+
+          if (selectedUrl) {
+            candidatePaths = [selectedUrl];
+          } else {
+            candidatePaths = probeCandidates;
+          }
+        }
+
+        for (const modelPath of candidatePaths) {
           try {
-            this.debugLog(`Trying to load model from: ${modelPath}`);
+            pathsAttempted++;
+            this.debugLog(`[${pathsAttempted}/${candidatePaths.length}] Trying to load model from: ${modelPath}`);
             await detectorService.loadModel(modelPath);
-            this.debugLog(`Successfully loaded model from: ${modelPath}`);
+            this.debugLog(`✅ Successfully loaded model from: ${modelPath}`);
             break;
           } catch (pathError) {
-            console.warn(`Failed to load from ${modelPath}:`, pathError);
+            const errorMsg = (pathError as Error).message;
+            console.warn(`❌ Failed to load from ${modelPath}:`, errorMsg);
             lastError = pathError;
             // Continue to next path
           }
         }
 
         if (!detectorService.isModelLoaded()) {
-          throw lastError || new Error('All model paths failed');
+          throw lastError || new Error(`All ${candidatePaths.length} model paths failed. Check console for details.`);
         }
       }
 
       this.modelLoaded = true;
       this.isModelLoading = false;
     } catch (err) {
-      this.error = 'Failed to load model: ' + (err as Error).message;
+      const errorMessage = (err as Error).message;
+      
+      // Provide helpful error messages for common issues
+      if (errorMessage.includes('iOS requires WebGL')) {
+        this.error = 'iOS Safari: WebGL is required but not available. Please check:\n' +
+                     '1. Safari Settings > Advanced > Enable WebGL\n' +
+                     '2. Try updating iOS to the latest version\n' +
+                     '3. Restart Safari browser';
+      } else if (errorMessage.includes('backend not found') || errorMessage.includes('no available backend')) {
+        this.error = 'No compatible graphics backend found. Your browser may not support WebGL or WebAssembly.';
+      } else {
+        this.error = 'Failed to load model: ' + errorMessage;
+      }
+      
       this.isModelLoading = false;
       console.error('Model loading error:', err);
     }
+  }
+
+
+  private async getUserMediaWithFallbacks(): Promise<MediaStream> {
+    const frameRate = { ideal: 60, min: 30 };
+    const constraintSets: MediaStreamConstraints[] = [];
+
+    if (this.cameraResolution === 'fhd') {
+      constraintSets.push({
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          frameRate
+        },
+        audio: false
+      });
+    } else if (this.cameraResolution === 'hd') {
+      constraintSets.push({
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate
+        },
+        audio: false
+      });
+    } else {
+      constraintSets.push({
+        video: {
+          facingMode: { ideal: 'environment' },
+          frameRate
+        },
+        audio: false
+      });
+    }
+
+    constraintSets.push(
+      {
+        video: { facingMode: { ideal: 'environment' } },
+        audio: false
+      },
+      {
+        video: true,
+        audio: false
+      }
+    );
+
+    let lastError: any = null;
+
+    for (const constraints of constraintSets) {
+      try {
+        return await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (err) {
+        lastError = err;
+        console.warn('getUserMedia failed with constraints:', constraints, err);
+      }
+    }
+
+    throw lastError || new Error('Failed to access camera');
+  }
+
+  private async waitForVideoReady(video: HTMLVideoElement): Promise<void> {
+    if (video.readyState >= 2 && video.videoWidth > 0) {
+      return;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const onReady = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = () => {
+        cleanup();
+        reject(new Error('Video failed to load'));
+      };
+      const timeout = window.setTimeout(() => {
+        cleanup();
+        resolve();
+      }, 2000);
+      const cleanup = () => {
+        window.clearTimeout(timeout);
+        video.removeEventListener('loadeddata', onReady);
+        video.removeEventListener('loadedmetadata', onReady);
+        video.removeEventListener('error', onError);
+      };
+      video.addEventListener('loadeddata', onReady, { once: true });
+      video.addEventListener('loadedmetadata', onReady, { once: true });
+      video.addEventListener('error', onError, { once: true });
+    });
   }
 
   async startCamera() {
@@ -132,27 +309,32 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
       if (this.isStreaming) {
         this.stopCamera();
       }
-      
-      // Request camera access with ideal constraints for barcode scanning
-      this.stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: 'environment',
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-          frameRate: { ideal: 30, max: 30 }
-        },
-        audio: false
-      });
+
+      this.stream = await this.getUserMediaWithFallbacks();
 
       const video = this.videoElement.nativeElement;
+      // Ensure iOS Safari plays inline and allows canvas capture
+      video.setAttribute('playsinline', 'true');
+      video.setAttribute('webkit-playsinline', 'true');
+      video.muted = true;
+      video.playsInline = true;
+
       video.srcObject = this.stream;
+
+      try {
+        await video.play();
+      } catch (playError) {
+        console.warn('Autoplay prevented, waiting for metadata:', playError);
+      }
+
+      await this.waitForVideoReady(video);
 
       const videoTrack = this.stream.getVideoTracks()[0];
       const capabilities = videoTrack?.getCapabilities?.() as any;
       if (capabilities) {
         const advanced: any = {};
-        if (capabilities.focusMode?.includes('continuous')) {
-          advanced.focusMode = 'continuous';
+        if (capabilities.focusMode?.includes('auto')) {
+          advanced.focusMode = 'auto';
         }
         if (capabilities.exposureMode?.includes('continuous')) {
           advanced.exposureMode = 'continuous';
@@ -169,17 +351,10 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
           }
         }
       }
-      
-      await new Promise((resolve) => {
-        video.onloadedmetadata = () => {
-          video.play();
-          resolve(true);
-        };
-      });
 
       this.isStreaming = true;
       this.currentResolution = `${video.videoWidth}x${video.videoHeight}`;
-      
+
       // Initialize FPS tracking
       this.lastVideoTime = 0;
       this.videoFrameCount = 0;
@@ -188,7 +363,7 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
       this.frameCount = 0;
       this.fpsUpdateTime = performance.now();
       this.fps = 0;
-      
+
       this.setupCanvas();
       this.startStreamRendering();
       this.startDetectionLoop();
@@ -363,10 +538,19 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
         const [x, y, width, height] = detection.bbox;
         if (width < 10 || height < 10) continue;
 
-        tempCanvas.width = Math.max(1, Math.round(width));
-        tempCanvas.height = Math.max(1, Math.round(height));
+        if (this.preprocessEnabled) {
+          const scale = 1.3;
+          tempCanvas.width = Math.max(1, Math.round(width * scale));
+          tempCanvas.height = Math.max(1, Math.round(height * scale));
+        } else {
+          tempCanvas.width = Math.max(1, Math.round(width));
+          tempCanvas.height = Math.max(1, Math.round(height));
+        }
         tempCtx.clearRect(0, 0, tempCanvas.width, tempCanvas.height);
         tempCtx.drawImage(canvas, x, y, width, height, 0, 0, tempCanvas.width, tempCanvas.height);
+        if (this.preprocessEnabled) {
+          this.preprocessForZXing(tempCtx, tempCanvas.width, tempCanvas.height);
+        }
 
         try {
           const result = await this.zxingReader.decodeFromCanvas(tempCanvas);
@@ -378,6 +562,34 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
       }
     } finally {
       this.decodeInFlight = false;
+    }
+  }
+
+  private preprocessForZXing(ctx: CanvasRenderingContext2D, width: number, height: number) {
+    const imageData = ctx.getImageData(0, 0, width, height);
+    const data = imageData.data;
+    const contrast = 1.1;
+    const threshold = 130;
+
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+      const adjusted = (gray - 128) * contrast + 128;
+      const value = adjusted > threshold ? 255 : 0;
+      data[i] = value;
+      data[i + 1] = value;
+      data[i + 2] = value;
+    }
+
+    ctx.putImageData(imageData, 0, 0);
+  }
+
+  onCameraResolutionChange() {
+    if (this.isStreaming) {
+      this.stopCamera();
+      this.startCamera();
     }
   }
 

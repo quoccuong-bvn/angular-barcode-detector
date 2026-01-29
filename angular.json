@@ -26,22 +26,7 @@
             "tsConfig": "tsconfig.app.json",
             "inlineStyleLanguage": "scss",
             "assets": [
-              "src/assets",
-              {
-                "glob": "**/*",
-                "input": "../",
-                "output": "/assets/models/",
-                "ignore": [
-                  "**/*.py",
-                  "**/*.pt",
-                  "**/node_modules/**",
-                  "**/angular-barcode-detector/**",
-                  "**/quagga2/**",
-                  "**/bk/**",
-                  "**/Barcode-detection/**",
-                  "**/YOLOV8s-Barcode-Detection/**"
-                ]
-              }
+              "src/assets"
             ],
             "styles": [
               "src/styles.scss"
@@ -50,6 +35,7 @@
           },
           "configurations": {
             "production": {
+              "baseHref": "/angular-barcode-detector/",
               "budgets": [
                 {
                   "type": "initial",
@@ -89,6 +75,9 @@
           "options": {
             "buildTarget": "angular-barcode-detector:build"
           }
+        },
+        "deploy": {
+          "builder": "angular-cli-ghpages:deploy"
         }
       }
     }

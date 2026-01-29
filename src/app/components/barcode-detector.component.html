@@ -1,10 +1,10 @@
-﻿<div class="detector-container">
+<div class="detector-container">
   <div class="header">
-    <h1>ðŸ” Barcode Detector</h1>
+    <h1>Barcode Detector</h1>
     <div class="status">
-      <span *ngIf="isModelLoading" class="loading">â³ Loading {{ useMockDetector ? 'Mock' : 'ONNX' }} model...</span>
-      <span *ngIf="modelLoaded && !isModelLoading" class="ready">âœ“ {{ useMockDetector ? 'Mock' : 'ONNX' }} Model ready</span>
-      <span *ngIf="error" class="error">âš  {{ error }}</span>
+      <span *ngIf="isModelLoading" class="loading">Loading {{ useMockDetector ? 'Mock' : 'ONNX' }} model...</span>
+      <span *ngIf="modelLoaded && !isModelLoading" class="ready">{{ useMockDetector ? 'Mock' : 'ONNX' }} Model ready</span>
+      <span *ngIf="error" class="error">{{ error }}</span>
     </div>
   </div>
 
@@ -13,8 +13,22 @@
       (click)="toggleCamera()" 
       [disabled]="!modelLoaded || isModelLoading"
       [class.stop]="isStreaming">
-      {{ isStreaming ? 'â¹ Stop Camera' : 'â–¶ Start Camera' }}
+      {{ isStreaming ? 'Stop Camera' : 'Start Camera' }}
     </button>
+    <div class="control-row">
+      <label class="control-toggle">
+        <input type="checkbox" [(ngModel)]="preprocessEnabled" />
+        Preprocess (resize + threshold)
+      </label>
+      <label class="control-select">
+        Resolution
+        <select [(ngModel)]="cameraResolution" (change)="onCameraResolutionChange()">
+          <option *ngFor="let option of cameraResolutionOptions" [value]="option.value">
+            {{ option.label }}
+          </option>
+        </select>
+      </label>
+    </div>
   </div>
 
   <div class="stats" *ngIf="isStreaming">
@@ -69,7 +83,7 @@
   </div>
 
   <div class="info" *ngIf="!isStreaming && modelLoaded">
-    <p>ðŸ“± Click "Start Camera" to begin detecting barcodes</p>
+    <p>Click "Start Camera" to begin detecting barcodes</p>
     <p>The detector will automatically identify and highlight barcodes in real-time</p>
   </div>
 </div>

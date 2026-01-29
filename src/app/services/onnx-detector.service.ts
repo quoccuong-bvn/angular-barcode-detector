@@ -1,5 +1,8 @@
-﻿import { Injectable } from '@angular/core';
+﻿import { DOCUMENT } from '@angular/common';
+import { Inject, Injectable } from '@angular/core';
 import * as ort from 'onnxruntime-web';
+import 'onnxruntime-web/webgl';
+import 'onnxruntime-web/wasm';
 
 export interface Detection {
   bbox: [number, number, number, number]; // [x, y, width, height]
@@ -24,20 +27,36 @@ export class OnnxDetectorService {
   private readonly confThreshold = 0.1; // Lowered from 0.25 to detect more
   private readonly iouThreshold = 0.45;
   private readonly debug = false;
+  private readonly isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
 
-  constructor() {
-    // Configure ONNX Runtime to load WASM files from assets
-    ort.env.wasm.wasmPaths = '/assets/wasm/';
+  constructor(@Inject(DOCUMENT) private documentRef: Document) {
+    // Configure ONNX Runtime to load WASM files from assets (works with GitHub Pages baseHref)
+    const baseUrl = this.documentRef.baseURI || window.location.href;
+    ort.env.wasm.wasmPaths = new URL('assets/wasm/', baseUrl).toString();
     
-    // Optimize thread count based on device capabilities
-    const optimalThreads = this.getOptimalThreadCount();
-    ort.env.wasm.numThreads = optimalThreads;
+    // iOS Safari doesn't support SharedArrayBuffer, so we must disable threads
+    // This must be set BEFORE any WASM module is loaded
+    if (this.isIOS) {
+      ort.env.wasm.numThreads = 1;
+      ort.env.wasm.simd = false;
+      this.debugLog('iOS detected: Using single-threaded WASM without SIMD');
+    } else {
+      // Optimize thread count based on device capabilities
+      const optimalThreads = this.getOptimalThreadCount();
+      ort.env.wasm.numThreads = optimalThreads;
+      ort.env.wasm.simd = true;
+      this.debugLog('Optimal thread count for this device:', optimalThreads);
+    }
+
+    const hasSharedMemory = typeof SharedArrayBuffer !== 'undefined' && (window as any).crossOriginIsolated === true;
+    if (!hasSharedMemory) {
+      ort.env.wasm.numThreads = 1;
+      this.debugLog('SharedArrayBuffer not available: forcing single-thread WASM');
+    }
     
-    ort.env.wasm.simd = true; // Prefer SIMD when supported
     ort.env.wasm.proxy = false; // Disable proxy to load from local assets
 
     this.debugLog('ONNX Runtime configured with WASM path:', ort.env.wasm.wasmPaths);
-    this.debugLog('Optimal thread count for this device:', optimalThreads);
   }
 
   private getOptimalThreadCount(): number {
@@ -76,18 +95,171 @@ export class OnnxDetectorService {
     }
   }
 
+  private getAvailableBackends(): string[] {
+    // Check what execution providers are actually registered in ONNX Runtime
+    try {
+      // ONNX Runtime Web typically has these backends
+      const possibleBackends = ['webgl', 'wasm', 'webnn', 'cpu'];
+      this.debugLog('Checking ONNX Runtime backend availability...');
+      return possibleBackends;
+    } catch (e) {
+      this.debugLog('Error checking backends:', e);
+      return [];
+    }
+  }
+
+  private hasWebGLSupport(): boolean {
+    try {
+      const canvas = document.createElement('canvas');
+      const gl = canvas.getContext('webgl2') || canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+      const hasGL = !!gl;
+      
+      if (gl && typeof (gl as any).getParameter === 'function') {
+        // Verify it's actually functional
+        const vendor = (gl as any).getParameter((gl as any).VENDOR);
+        this.debugLog('WebGL vendor:', vendor);
+      }
+      
+      this.debugLog('WebGL support:', hasGL);
+      return hasGL;
+    } catch (e) {
+      this.debugLog('WebGL check failed:', e);
+      return false;
+    }
+  }
+
+  private hasWasmSupport(): boolean {
+    // WASM can work without SharedArrayBuffer, just without multi-threading
+    try {
+      return typeof WebAssembly !== 'undefined' && typeof WebAssembly.instantiate === 'function';
+    } catch {
+      return false;
+    }
+  }
+
+  private hasWasmSharedMemorySupport(): boolean {
+    const hasSharedArrayBuffer = typeof SharedArrayBuffer !== 'undefined';
+    const isIsolated = (window as any).crossOriginIsolated === true;
+    return hasSharedArrayBuffer && isIsolated;
+  }
+
   async loadModel(modelPath: string): Promise<void> {
     try {
       this.debugLog('Loading ORT model from:', modelPath);
       this.debugLog('ONNX Runtime version:', ort.env.versions);
+      this.debugLog('Available backends:', this.getAvailableBackends());
+      this.debugLog('Current location:', window.location.href);
 
-      // Try WebGL first (better performance), fallback to WASM
-      const providers = ['webgl', 'wasm'];
+      // For iOS, try different loading strategies
+      if (this.isIOS) {
+        // Fetch model as ArrayBuffer first (sometimes helps with iOS)
+        let modelData: ArrayBuffer | null = null;
+        try {
+          const absoluteUrl = new URL(modelPath, window.location.href).toString();
+          const candidates = [absoluteUrl];
+          if (absoluteUrl.includes('?')) {
+            candidates.push(absoluteUrl.split('?')[0]);
+          }
+
+          let lastFetchError: any = null;
+          for (const url of candidates) {
+            try {
+              this.debugLog('iOS: Fetching model as ArrayBuffer:', url);
+              const response = await fetch(url, { cache: 'no-store' });
+              if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+              }
+              modelData = await response.arrayBuffer();
+              this.debugLog(`iOS: Model loaded, size: ${modelData.byteLength} bytes`);
+              break;
+            } catch (fetchError: any) {
+              lastFetchError = fetchError;
+              this.debugLog('iOS: Fetch failed for URL:', url, fetchError?.message || fetchError);
+            }
+          }
+
+          if (!modelData) {
+            throw lastFetchError || new Error('Unknown fetch error');
+          }
+        } catch (fetchError: any) {
+          throw new Error(`iOS: Cannot fetch model file: ${fetchError.message}`);
+        }
+
+        // Strategy 1: Try with explicit WebGL
+        try {
+          this.debugLog('iOS Strategy 1: Trying explicit WebGL provider');
+          this.session = await ort.InferenceSession.create(modelData, {
+            executionProviders: ['webgl'],
+            graphOptimizationLevel: 'all'
+          });
+          this.debugLog('✅ iOS: Successfully loaded with WebGL');
+          this.modelLoaded = true;
+          return;
+        } catch (webglError: any) {
+          const errorMsg = webglError?.message || String(webglError);
+          console.error('iOS WebGL failed:', webglError);
+          this.debugLog('❌ iOS Strategy 1 failed:', errorMsg);
+        }
+
+        // Strategy 2: Try with WASM (might work on newer iOS versions)
+        try {
+          this.debugLog('iOS Strategy 2: Trying WASM provider');
+          this.session = await ort.InferenceSession.create(modelData, {
+            executionProviders: ['wasm'],
+            graphOptimizationLevel: 'basic'
+          });
+          this.debugLog('✅ iOS: Successfully loaded with WASM');
+          this.modelLoaded = true;
+          return;
+        } catch (wasmError: any) {
+          const errorMsg = wasmError?.message || String(wasmError);
+          console.error('iOS WASM failed:', wasmError);
+          this.debugLog('❌ iOS Strategy 2 failed:', errorMsg);
+        }
+
+        // Strategy 3: Let ONNX Runtime auto-select backend
+        try {
+          this.debugLog('iOS Strategy 3: Auto-select backend');
+          this.session = await ort.InferenceSession.create(modelData, {
+            graphOptimizationLevel: 'basic'
+          });
+          this.debugLog('✅ iOS: Successfully loaded with auto-selected backend');
+          this.modelLoaded = true;
+          return;
+        } catch (autoError: any) {
+          const errorMsg = autoError?.message || String(autoError);
+          console.error('iOS auto-select failed:', autoError);
+          this.debugLog('❌ iOS Strategy 3 failed:', errorMsg);
+          
+          // Provide detailed error message
+          throw new Error(`iOS: Cannot load model. All strategies failed.\n` +
+                         `Last error: ${errorMsg}\n` +
+                         `Model size: ${modelData.byteLength} bytes\n` +
+                         `Try: 1) Enable WebGL in Safari 2) Update iOS 3) Use different browser`);
+        }
+      }
+
+      // Non-iOS path: Try WebGL first, then WASM
+      const webglSupported = this.hasWebGLSupport();
+      const wasmSupported = this.hasWasmSupport();
+      
+      this.debugLog('Backend support:', { webglSupported, wasmSupported });
+
+      const providers: ('webgl' | 'wasm')[] = [];
+      if (webglSupported) providers.push('webgl');
+      if (wasmSupported) providers.push('wasm');
+
+      if (providers.length === 0) {
+        throw new Error('No available backend. Both WebGL and WASM are unavailable.');
+      }
+
       let simdFallbackAttempted = false;
 
+      let lastProviderError: any = null;
       for (const provider of providers) {
         try {
           this.debugLog(`Trying execution provider: ${provider}`);
+          
           this.session = await ort.InferenceSession.create(modelPath, {
             executionProviders: [provider],
             graphOptimizationLevel: 'all'
@@ -95,6 +267,7 @@ export class OnnxDetectorService {
           this.debugLog(`Successfully loaded model with ${provider} provider`);
           break;
         } catch (providerError) {
+          lastProviderError = providerError;
           console.warn(`Failed to load with ${provider}:`, providerError);
           if (provider === 'wasm' && ort.env.wasm.simd && !simdFallbackAttempted) {
             try {
@@ -112,16 +285,31 @@ export class OnnxDetectorService {
               throw fallbackError;
             }
           }
-          if (provider === 'wasm') {
-            throw providerError; // If both fail, throw the last error
-          }
         }
+      }
+
+      if (!this.session) {
+        // Last resort: try loading without specifying provider (let ONNX Runtime decide)
+        try {
+          this.debugLog('All providers failed, trying default backend...');
+          this.session = await ort.InferenceSession.create(modelPath, {
+            graphOptimizationLevel: 'basic'
+          });
+          this.debugLog('Successfully loaded model with default backend');
+        } catch (defaultError) {
+          console.error('Default backend also failed:', defaultError);
+          throw lastProviderError || defaultError;
+        }
+      }
+
+      if (!this.session) {
+        throw lastProviderError || new Error('Failed to initialize inference session');
       }
 
       this.modelLoaded = true;
       this.debugLog('Model loaded successfully');
-      this.debugLog('Input names:', this.session!.inputNames);
-      this.debugLog('Output names:', this.session!.outputNames);
+      this.debugLog('Input names:', this.session.inputNames);
+      this.debugLog('Output names:', this.session.outputNames);
     } catch (error) {
       console.error('Failed to load ONNX model:', error);
       this.modelLoaded = false;
