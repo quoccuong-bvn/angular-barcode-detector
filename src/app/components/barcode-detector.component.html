@@ -6,6 +6,20 @@
       <span *ngIf="modelLoaded && !isModelLoading" class="ready">{{ useMockDetector ? 'Mock' : 'ONNX' }} Model ready</span>
       <span *ngIf="error" class="error">{{ error }}</span>
     </div>
+    <div class="status">
+      <span>COOP/COEP: <strong>{{ crossOriginIsolated ? 'Enabled' : 'Disabled' }}</strong></span>
+      <span>WebGL: <strong>{{ webglSupported ? 'Available' : 'Unavailable' }}</strong></span>
+      <span>WASM: <strong>{{ wasmSupported ? 'Available' : 'Unavailable' }}</strong></span>
+    </div>
+    <div class="status" *ngIf="diagnostics">
+      <span>Model URL: <strong>{{ diagnostics.modelUrl || '-' }}</strong></span>
+      <span>Model size: <strong>{{ diagnostics.modelSizeBytes ? (diagnostics.modelSizeBytes / (1024 * 1024) | number:'1.1-1') + ' MB' : '-' }}</strong></span>
+      <span>Backend used: <strong>{{ diagnostics.backendUsed || '-' }}</strong></span>
+      <span *ngIf="diagnostics.attempts.length > 0">
+        Attempts:
+        <strong>{{ getDiagnosticsAttemptsSummary() }}</strong>
+      </span>
+    </div>
   </div>
 
   <div class="controls">
