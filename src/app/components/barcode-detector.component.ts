@@ -42,6 +42,10 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
   private overlayDirty = false;
   private detectionInFlight = false;
   private readonly tempDecodeCanvas = document.createElement('canvas');
+  private detectionWorker: Worker | null = null;
+  private workerReady = false;
+  private workerBusy = false;
+  private workerRequestId = 0;
   private lastFrameTime = 0;
   private frameCount = 0;
   private fpsUpdateTime = 0;
@@ -135,10 +139,15 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
 
   async ngOnInit() {
     await this.loadModel();
+    this.initDetectionWorker();
   }
 
   ngOnDestroy() {
     this.stopCamera();
+    if (this.detectionWorker) {
+      this.detectionWorker.terminate();
+      this.detectionWorker = null;
+    }
   }
 
   private async loadModel() {
@@ -252,9 +261,52 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
     }
   }
 
+  private initDetectionWorker() {
+    if (typeof Worker === 'undefined') {
+      return;
+    }
+    try {
+      this.detectionWorker = new Worker(
+        new URL('../workers/detection.worker', import.meta.url),
+        { type: 'module' }
+      );
+      this.detectionWorker.onmessage = (event) => {
+        const { type, id, detections, error } = event.data || {};
+        if (type === 'ready') {
+          this.workerReady = true;
+          return;
+        }
+        if (type === 'error') {
+          this.workerBusy = false;
+          this.detectionInFlight = false;
+          console.error('Worker detection error:', error);
+          return;
+        }
+        if (type === 'result') {
+          void this.handleWorkerResult(id, detections || []);
+        }
+      };
+
+      const modelUrl = this.diagnostics?.modelUrl;
+      if (modelUrl) {
+        this.detectionWorker.postMessage({
+          type: 'config',
+          payload: {
+            inputSize: 160,
+            confThreshold: 0.1,
+            iouThreshold: 0.45
+          }
+        });
+        this.detectionWorker.postMessage({ type: 'load', payload: { modelUrl } });
+      }
+    } catch (err) {
+      console.error('Failed to init detection worker:', err);
+    }
+  }
+
 
   private async getUserMediaWithFallbacks(): Promise<MediaStream> {
-    const frameRate = { ideal: 60, min: 30 };
+    const frameRate = { ideal: 30, min: 20 };
     const constraintSets: MediaStreamConstraints[] = [];
 
     if (this.cameraResolution === 'fhd') {
@@ -514,6 +566,26 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
 
     // Run detection
     try {
+      if (this.workerReady && this.detectionWorker && !this.workerBusy) {
+        this.workerBusy = true;
+        const id = ++this.workerRequestId;
+        this.detectionWorker.postMessage(
+          {
+            type: 'detect',
+            payload: {
+              id,
+              width: imageData.width,
+              height: imageData.height,
+              buffer: imageData.data.buffer,
+              roiX,
+              roiY
+            }
+          },
+          [imageData.data.buffer]
+        );
+        return;
+      }
+
       const detectorService = this.useMockDetector ? this.mockDetectorService : this.onnxDetectorService;
       const detections = await detectorService.detect(imageData);
       const mappedDetections = detections.map((detection) => {
@@ -559,6 +631,53 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
     } finally {
       this.detectionInFlight = false;
     }
+  }
+
+  private async handleWorkerResult(_id: number, detections: Detection[]) {
+    this.workerBusy = false;
+    this.detectionInFlight = false;
+
+    const canvas = this.canvasElement.nativeElement;
+    const roiX = Math.round(canvas.width * this.roi.left);
+    const roiY = Math.round(canvas.height * this.roi.top);
+
+    const mappedDetections = detections.map((detection) => {
+      const [x, y, width, height] = detection.bbox;
+      return {
+        ...detection,
+        bbox: [x + roiX, y + roiY, width, height] as [number, number, number, number]
+      };
+    });
+
+    const visibleDetections = mappedDetections.filter((detection) => detection.confidence >= 0.3);
+    const topDetection = visibleDetections.length > 0
+      ? visibleDetections.reduce((best, current) => (current.confidence > best.confidence ? current : best))
+      : null;
+    const displayDetections = topDetection ? [topDetection] : [];
+    this.detectionCount = displayDetections.length;
+
+    if (displayDetections.length > 0) {
+      await this.decodeBarcodes(canvas, displayDetections);
+    }
+
+    const now = performance.now();
+    if (this.decodedText && now - this.lastDecodedAt > this.decodedStaleMs) {
+      this.decodedText = '';
+      this.decodedFormat = '';
+    }
+    if (displayDetections.length === 0) {
+      this.desiredStreamMessage = 'Please place barcode inside the red box';
+      this.desiredStreamPriority = 0;
+    } else if (!this.decodedText) {
+      this.desiredStreamMessage = 'Move closer to the barcode for better scanning';
+      this.desiredStreamPriority = 1;
+    } else {
+      this.desiredStreamMessage = '';
+      this.desiredStreamPriority = 2;
+    }
+    this.updateStreamMessage();
+
+    this.cacheDetectionOverlay(canvas, displayDetections);
   }
 
   private async decodeBarcodes(canvas: HTMLCanvasElement, detections: Detection[]) {
