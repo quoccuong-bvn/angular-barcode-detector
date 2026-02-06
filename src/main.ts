@@ -3,4 +3,6 @@ import { AppComponent } from './app/app.component';
 
 bootstrapApplication(AppComponent, {
   providers: []
-}).catch(err => console.error(err));
+}).catch(err => {
+  // Bootstrap error
+});

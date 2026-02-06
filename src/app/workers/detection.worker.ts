@@ -21,6 +21,11 @@ let session: ort.InferenceSession | null = null;
 let inputSize = 160;
 let confThreshold = 0.1;
 let iouThreshold = 0.45;
+let preprocessCanvas: OffscreenCanvas | null = null;
+let preprocessCtx: OffscreenCanvasRenderingContext2D | null = null;
+let preprocessTempCanvas: OffscreenCanvas | null = null;
+let preprocessTempCtx: OffscreenCanvasRenderingContext2D | null = null;
+let preprocessBuffer: Float32Array | null = null;
 
 const isIOS = /iPad|iPhone|iPod/.test(self.navigator.userAgent);
 
@@ -43,8 +48,16 @@ function getOptimalThreadCount(): number {
 
 function preprocessImage(imageData: ImageData): PreprocessResult {
   const { width, height } = imageData;
-  const canvas = new OffscreenCanvas(inputSize, inputSize);
-  const ctx = canvas.getContext('2d')!;
+  if (!preprocessCanvas) {
+    preprocessCanvas = new OffscreenCanvas(inputSize, inputSize);
+    preprocessCtx = preprocessCanvas.getContext('2d');
+  }
+  if (!preprocessTempCanvas) {
+    preprocessTempCanvas = new OffscreenCanvas(width, height);
+    preprocessTempCtx = preprocessTempCanvas.getContext('2d');
+  }
+  const canvas = preprocessCanvas;
+  const ctx = preprocessCtx!;
 
   const scale = Math.min(inputSize / width, inputSize / height);
   const resizedWidth = Math.round(width * scale);
@@ -55,24 +68,33 @@ function preprocessImage(imageData: ImageData): PreprocessResult {
   ctx.fillStyle = 'rgb(114, 114, 114)';
   ctx.fillRect(0, 0, inputSize, inputSize);
 
-  const tempCanvas = new OffscreenCanvas(width, height);
-  const tempCtx = tempCanvas.getContext('2d')!;
+  const tempCanvas = preprocessTempCanvas!;
+  if (tempCanvas.width !== width) {
+    tempCanvas.width = width;
+  }
+  if (tempCanvas.height !== height) {
+    tempCanvas.height = height;
+  }
+  const tempCtx = preprocessTempCtx!;
   tempCtx.putImageData(imageData, 0, 0);
   ctx.drawImage(tempCanvas, padX, padY, resizedWidth, resizedHeight);
   const resizedData = ctx.getImageData(0, 0, inputSize, inputSize);
 
   const pixelData = resizedData.data;
-  const red: number[] = [];
-  const green: number[] = [];
-  const blue: number[] = [];
-
-  for (let i = 0; i < pixelData.length; i += 4) {
-    red.push(pixelData[i] / 255.0);
-    green.push(pixelData[i + 1] / 255.0);
-    blue.push(pixelData[i + 2] / 255.0);
+  const size = inputSize * inputSize;
+  if (!preprocessBuffer || preprocessBuffer.length !== size * 3) {
+    preprocessBuffer = new Float32Array(size * 3);
   }
-
-  const transposed = Float32Array.from([...red, ...green, ...blue]);
+  const transposed = preprocessBuffer;
+  let rOffset = 0;
+  let gOffset = size;
+  let bOffset = size * 2;
+  for (let i = 0; i < size; i++) {
+    const idx = i * 4;
+    transposed[rOffset + i] = pixelData[idx] / 255.0;
+    transposed[gOffset + i] = pixelData[idx + 1] / 255.0;
+    transposed[bOffset + i] = pixelData[idx + 2] / 255.0;
+  }
 
   return {
     tensor: new ort.Tensor('float32', transposed, [1, 3, inputSize, inputSize]),
@@ -217,13 +239,22 @@ function postprocess(output: ort.Tensor, originalWidth: number, originalHeight: 
 }
 
 function nonMaxSuppression(detections: Detection[]): Detection[] {
-  if (detections.length === 0) return [];
+  const count = detections.length;
+  if (count === 0) return [];
   detections.sort((a, b) => b.confidence - a.confidence);
+  const suppressed = new Array<boolean>(count).fill(false);
   const keep: Detection[] = [];
-  while (detections.length > 0) {
-    const current = detections.shift()!;
+  for (let i = 0; i < count; i++) {
+    if (suppressed[i]) continue;
+    const current = detections[i];
     keep.push(current);
-    detections = detections.filter(det => calculateIoU(current.bbox, det.bbox) < iouThreshold);
+    for (let j = i + 1; j < count; j++) {
+      if (suppressed[j]) continue;
+      const iou = calculateIoU(current.bbox, detections[j].bbox);
+      if (iou >= iouThreshold) {
+        suppressed[j] = true;
+      }
+    }
   }
   return keep;
 }
@@ -263,12 +294,19 @@ async function loadModel(modelUrl: string) {
     ort.env.wasm.simd = true;
   }
 
-  const preferredProviders: ('wasm' | 'webgl')[] = isIOS && hasSharedMemory ? ['wasm', 'webgl'] : ['webgl', 'wasm'];
+  const preferredProviders: Array<'wasm' | 'webgl'> = [];
+  if (isIOS && hasSharedMemory) {
+    preferredProviders.push('wasm', 'webgl');
+  } else if (isIOS) {
+    preferredProviders.push('webgl', 'wasm');
+  } else {
+    preferredProviders.push('webgl', 'wasm');
+  }
 
   for (const provider of preferredProviders) {
     try {
       session = await ort.InferenceSession.create(modelUrl, {
-        executionProviders: [provider],
+        executionProviders: [provider as any],
         graphOptimizationLevel: 'all'
       });
       return;

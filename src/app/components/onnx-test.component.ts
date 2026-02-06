@@ -88,7 +88,6 @@ export class OnnxTestComponent implements OnInit {
     } catch (err: any) {
       this.error = err.message;
       this.details += `\n❌ Test failed: ${err.message}\n`;
-      console.error('ONNX Test Error:', err);
     } finally {
       this.isTesting = false;
     }

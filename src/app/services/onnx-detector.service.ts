@@ -1,4 +1,4 @@
-﻿import { DOCUMENT } from '@angular/common';
+import { DOCUMENT } from '@angular/common';
 import { Inject, Injectable } from '@angular/core';
 import * as ort from 'onnxruntime-web';
 import 'onnxruntime-web/webgl';
@@ -48,27 +48,21 @@ export class OnnxDetectorService {
         const optimalThreads = this.getOptimalThreadCount();
         ort.env.wasm.numThreads = optimalThreads;
         ort.env.wasm.simd = false;
-        this.debugLog('iOS detected: Using threaded WASM (COOP/COEP enabled). Threads:', optimalThreads);
       } else {
         ort.env.wasm.numThreads = 1;
         ort.env.wasm.simd = false;
-        this.debugLog('iOS detected: Using single-threaded WASM without SIMD');
       }
     } else {
       // Optimize thread count based on device capabilities
       const optimalThreads = this.getOptimalThreadCount();
       ort.env.wasm.numThreads = optimalThreads;
       ort.env.wasm.simd = true;
-      this.debugLog('Optimal thread count for this device:', optimalThreads);
     }
     if (!hasSharedMemory) {
       ort.env.wasm.numThreads = 1;
-      this.debugLog('SharedArrayBuffer not available: forcing single-thread WASM');
     }
     
     ort.env.wasm.proxy = false; // Disable proxy to load from local assets
-
-    this.debugLog('ONNX Runtime configured with WASM path:', ort.env.wasm.wasmPaths);
   }
 
   private getOptimalThreadCount(): number {
@@ -91,20 +85,7 @@ export class OnnxDetectorService {
       optimalThreads = Math.min(4, Math.max(2, Math.floor(hardwareConcurrency / 2)));
     }
     
-    this.debugLog('Device detection:', { 
-      hardwareConcurrency, 
-      isMobile, 
-      isTouchDevice, 
-      optimalThreads 
-    });
-    
     return optimalThreads;
-  }
-
-  private debugLog(...args: any[]) {
-    if (this.debug) {
-      console.log(...args);
-    }
   }
 
   private formatErrorDetail(error: unknown): string {
@@ -133,10 +114,8 @@ export class OnnxDetectorService {
     try {
       // ONNX Runtime Web typically has these backends
       const possibleBackends = ['webgl', 'wasm', 'webnn', 'cpu'];
-      this.debugLog('Checking ONNX Runtime backend availability...');
       return possibleBackends;
     } catch (e) {
-      this.debugLog('Error checking backends:', e);
       return [];
     }
   }
@@ -150,13 +129,10 @@ export class OnnxDetectorService {
       if (gl && typeof (gl as any).getParameter === 'function') {
         // Verify it's actually functional
         const vendor = (gl as any).getParameter((gl as any).VENDOR);
-        this.debugLog('WebGL vendor:', vendor);
       }
       
-      this.debugLog('WebGL support:', hasGL);
       return hasGL;
     } catch (e) {
-      this.debugLog('WebGL check failed:', e);
       return false;
     }
   }
@@ -179,10 +155,6 @@ export class OnnxDetectorService {
   async loadModel(modelPath: string): Promise<void> {
     try {
       this.lastDiagnostics = { attempts: [] };
-      this.debugLog('Loading ORT model from:', modelPath);
-      this.debugLog('ONNX Runtime version:', ort.env.versions);
-      this.debugLog('Available backends:', this.getAvailableBackends());
-      this.debugLog('Current location:', window.location.href);
 
       // For iOS, try different loading strategies
       if (this.isIOS) {
@@ -198,7 +170,6 @@ export class OnnxDetectorService {
           let lastFetchError: any = null;
           for (const url of candidates) {
             try {
-              this.debugLog('iOS: Fetching model as ArrayBuffer:', url);
               const response = await fetch(url, { cache: 'no-store' });
               if (!response.ok) {
                 throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -206,11 +177,9 @@ export class OnnxDetectorService {
               modelData = await response.arrayBuffer();
               this.lastDiagnostics.modelUrl = url;
               this.lastDiagnostics.modelSizeBytes = modelData.byteLength;
-              this.debugLog(`iOS: Model loaded, size: ${modelData.byteLength} bytes`);
               break;
             } catch (fetchError: any) {
               lastFetchError = fetchError;
-              this.debugLog('iOS: Fetch failed for URL:', url, fetchError?.message || fetchError);
             }
           }
 
@@ -224,73 +193,71 @@ export class OnnxDetectorService {
         // Strategy 1: Try WASM threaded first (if SharedArrayBuffer + COOP/COEP are available)
         if (this.hasWasmSharedMemorySupport()) {
           try {
-            this.debugLog('iOS Strategy 1: Trying WASM provider (threaded)');
             this.session = await ort.InferenceSession.create(modelData, {
               executionProviders: ['wasm'],
               graphOptimizationLevel: 'all'
             });
             this.lastDiagnostics.backendUsed = 'wasm (threaded)';
-            this.debugLog('✅ iOS: Successfully loaded with WASM (threaded)');
             this.modelLoaded = true;
             return;
           } catch (wasmError: any) {
             const errorMsg = this.formatErrorDetail(wasmError);
             console.error('iOS WASM (threaded) failed:', wasmError);
-            this.debugLog('❌ iOS Strategy 1 failed:', errorMsg);
+            
             this.lastDiagnostics.attempts.push({ backend: 'wasm (threaded)', detail: errorMsg });
           }
         }
 
         // Strategy 2: Try WebGL
         try {
-          this.debugLog('iOS Strategy 2: Trying explicit WebGL provider');
+          
           this.session = await ort.InferenceSession.create(modelData, {
             executionProviders: ['webgl'],
             graphOptimizationLevel: 'all'
           });
           this.lastDiagnostics.backendUsed = 'webgl';
-          this.debugLog('✅ iOS: Successfully loaded with WebGL');
+          
           this.modelLoaded = true;
           return;
         } catch (webglError: any) {
           const errorMsg = this.formatErrorDetail(webglError);
           console.error('iOS WebGL failed:', webglError);
-          this.debugLog('❌ iOS Strategy 2 failed:', errorMsg);
+          
           this.lastDiagnostics.attempts.push({ backend: 'webgl', detail: errorMsg });
         }
 
         // Strategy 3: Try WASM single-threaded
         try {
-          this.debugLog('iOS Strategy 3: Trying WASM provider (single-threaded)');
+          
           this.session = await ort.InferenceSession.create(modelData, {
             executionProviders: ['wasm'],
             graphOptimizationLevel: 'basic'
           });
           this.lastDiagnostics.backendUsed = 'wasm (single-threaded)';
-          this.debugLog('✅ iOS: Successfully loaded with WASM (single-threaded)');
+          
           this.modelLoaded = true;
           return;
         } catch (wasmError: any) {
           const errorMsg = this.formatErrorDetail(wasmError);
           console.error('iOS WASM (single-threaded) failed:', wasmError);
-          this.debugLog('❌ iOS Strategy 3 failed:', errorMsg);
+          
           this.lastDiagnostics.attempts.push({ backend: 'wasm (single-threaded)', detail: errorMsg });
         }
 
         // Strategy 3: Let ONNX Runtime auto-select backend
         try {
-          this.debugLog('iOS Strategy 3: Auto-select backend');
+          
           this.session = await ort.InferenceSession.create(modelData, {
             graphOptimizationLevel: 'basic'
           });
           this.lastDiagnostics.backendUsed = 'auto';
-          this.debugLog('✅ iOS: Successfully loaded with auto-selected backend');
+          
           this.modelLoaded = true;
           return;
         } catch (autoError: any) {
           const errorMsg = this.formatErrorDetail(autoError);
           console.error('iOS auto-select failed:', autoError);
-          this.debugLog('❌ iOS Strategy 3 failed:', errorMsg);
+          
           this.lastDiagnostics.attempts.push({ backend: 'auto', detail: errorMsg });
           
           // Provide detailed error message
@@ -305,7 +272,7 @@ export class OnnxDetectorService {
       const webglSupported = this.hasWebGLSupport();
       const wasmSupported = this.hasWasmSupport();
       
-      this.debugLog('Backend support:', { webglSupported, wasmSupported });
+      
 
       const providers: ('webgl' | 'wasm')[] = [];
       if (webglSupported) providers.push('webgl');
@@ -321,14 +288,14 @@ export class OnnxDetectorService {
       let lastProviderError: any = null;
       for (const provider of providers) {
         try {
-          this.debugLog(`Trying execution provider: ${provider}`);
+          
           
           this.session = await ort.InferenceSession.create(modelPath, {
             executionProviders: [provider],
             graphOptimizationLevel: 'all'
           });
           this.lastDiagnostics.backendUsed = provider;
-          this.debugLog(`Successfully loaded model with ${provider} provider`);
+          
           break;
         } catch (providerError) {
           lastProviderError = providerError;
@@ -344,7 +311,7 @@ export class OnnxDetectorService {
                 graphOptimizationLevel: 'all'
               });
               this.lastDiagnostics.backendUsed = 'wasm (simd disabled)';
-              this.debugLog('Successfully loaded model with wasm provider (SIMD disabled)');
+              
               break;
             } catch (fallbackError) {
               console.warn('Failed to load with wasm provider (SIMD disabled):', fallbackError);
@@ -358,12 +325,12 @@ export class OnnxDetectorService {
       if (!this.session) {
         // Last resort: try loading without specifying provider (let ONNX Runtime decide)
         try {
-          this.debugLog('All providers failed, trying default backend...');
+          
           this.session = await ort.InferenceSession.create(modelPath, {
             graphOptimizationLevel: 'basic'
           });
           this.lastDiagnostics.backendUsed = 'default';
-          this.debugLog('Successfully loaded model with default backend');
+          
         } catch (defaultError) {
           console.error('Default backend also failed:', defaultError);
           this.lastDiagnostics.attempts.push({ backend: 'default', detail: this.formatErrorDetail(defaultError) });
@@ -376,9 +343,9 @@ export class OnnxDetectorService {
       }
 
       this.modelLoaded = true;
-      this.debugLog('Model loaded successfully');
-      this.debugLog('Input names:', this.session.inputNames);
-      this.debugLog('Output names:', this.session.outputNames);
+      
+      
+      
     } catch (error) {
       console.error('Failed to load ONNX model:', error);
       this.modelLoaded = false;
@@ -482,9 +449,9 @@ export class OnnxDetectorService {
     const outputData = output.data as Float32Array;
     const dimensions = output.dims;
     
-    this.debugLog('ðŸ” ONNX Output dimensions:', dimensions);
-    this.debugLog('ðŸ” Output data length:', outputData.length);
-    this.debugLog('ðŸ” First 20 values:', Array.from(outputData.slice(0, 20)));
+    
+    
+    
     
     // YOLO output format is typically [1, features, predictions] or [1, predictions, features]
     let numPredictions = 0;
@@ -552,9 +519,9 @@ export class OnnxDetectorService {
 
     const { scale, padX, padY } = preprocess;
 
-    this.debugLog('ðŸ” Processing predictions:', numPredictions, 'features:', numFeatures, 'classes:', numClasses, 'featuresFirst:', featuresFirst, 'hasObjectness:', hasObjectness);
-    this.debugLog('🔍 Letterbox scale:', scale, 'pad:', padX, padY);
-    this.debugLog('ðŸ” Confidence threshold:', this.confThreshold);
+    
+    
+    
     
     const getValue = (featureIndex: number, predictionIndex: number): number => {
       if (featuresFirst) {
@@ -623,15 +590,6 @@ export class OnnxDetectorService {
         const clampedW = Math.max(0, Math.min(originalWidth - clampedX, width));
         const clampedH = Math.max(0, Math.min(originalHeight - clampedY, height));
 
-        if (candidateCount <= 3) {
-          this.debugLog(`ðŸŽ¯ Detection ${candidateCount}:`, {
-            raw: { x_center: x_center.toFixed(4), y_center: y_center.toFixed(4), w: w.toFixed(4), h: h.toFixed(4) },
-            pixel: { x_pixel: x_pixel.toFixed(1), y_pixel: y_pixel.toFixed(1), w_pixel: w_pixel.toFixed(1), h_pixel: h_pixel.toFixed(1) },
-            confidence: confidence.toFixed(3),
-            final_bbox: [clampedX.toFixed(1), clampedY.toFixed(1), clampedW.toFixed(1), clampedH.toFixed(1)]
-          });
-        }
-
         detections.push({
           bbox: [clampedX, clampedY, clampedW, clampedH],
           confidence: confidence,
@@ -640,11 +598,11 @@ export class OnnxDetectorService {
       }
     }
 
-    this.debugLog(`âœ… Found ${detections.length} candidate detections (threshold: ${this.confThreshold})`);
+    
 
     // Apply NMS (Non-Maximum Suppression)
     const finalDetections = this.nonMaxSuppression(detections);
-    this.debugLog(`ðŸŽ¯ After NMS: ${finalDetections.length} final detections`);
+    
     return finalDetections;
   }
 

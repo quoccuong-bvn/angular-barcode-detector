@@ -2,7 +2,6 @@
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { OnnxDetectorService, Detection } from '../services/onnx-detector.service';
-import { BrowserMultiFormatReader } from '@zxing/browser';
 import { MockDetectorService } from '../services/mock-detector.service';
 
 @Component({
@@ -27,6 +26,13 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
   decodedText = '';
   decodedFormat = '';
   decodedHistory: { text: string; format: string; time: string }[] = [];
+  private lastDecodedAt = 0;
+  private recentDecodeHistory: string[] = []; // Track recent decode results
+  private readonly requiredConsecutiveDecodes = 2; // Need 2 consecutive same results OR 2 same results in last 10
+  private readonly maxHistorySize = 10; // Keep last 10 decode results
+  showDecodePopup = false;
+  finalDecodedText = '';
+  finalDecodedFormat = '';
   streamMessage = '';
   private desiredStreamMessage = '';
   private desiredStreamPriority = 0;
@@ -42,7 +48,13 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
   private overlayDirty = false;
   private detectionInFlight = false;
   private readonly tempDecodeCanvas = document.createElement('canvas');
+  private readonly detectionCanvas = document.createElement('canvas');
+  private detectionCtx: CanvasRenderingContext2D | null = null;
   private detectionWorker: Worker | null = null;
+  private decodeWorker: Worker | null = null;
+  private decodeWorkerReady = false;
+  private decodeWorkerBusy = false;
+  private decodeWorkerRequestId = 0;
   private workerReady = false;
   private workerBusy = false;
   private workerRequestId = 0;
@@ -52,16 +64,12 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
   private lastVideoTime = 0;
   private videoFrameCount = 0;
   private lastVideoFpsUpdate = 0;
+  private lastFpsUiUpdate = 0;
   private readonly debug = false;
-  private readonly decodeCooldownMs = 0; // Removed cooldown since detection already has 300ms interval
+  private readonly decodeCooldownMs = 0; // Removed cooldown since detection already has 500ms interval
   private lastDecodeAt = 0;
   private decodeInFlight = false;
-  private lastDecodedAt = 0;
   private readonly decodedStaleMs = 4000;
-  private readonly zxingReader = new BrowserMultiFormatReader();
-  readonly crossOriginIsolated = typeof window !== 'undefined' && window.crossOriginIsolated === true;
-  readonly webglSupported = this.checkWebGLSupport();
-  readonly wasmSupported = this.checkWasmSupport();
   diagnostics: {
     modelUrl?: string;
     modelSizeBytes?: number;
@@ -74,13 +82,6 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
     bottom: 0.25,
     left: 0.2
   };
-  preprocessEnabled = false;
-  cameraResolution = 'fhd';
-  readonly cameraResolutionOptions = [
-    { value: 'fhd', label: 'Full HD (1920x1080)' },
-    { value: 'hd', label: 'HD (1280x720)' },
-    { value: 'auto', label: 'Auto (device default)' }
-  ];
 
   constructor(
     private onnxDetectorService: OnnxDetectorService,
@@ -103,30 +104,6 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
     return pathname + '/';
   }
 
-  private debugLog(...args: any[]) {
-    if (this.debug) {
-      console.log(...args);
-    }
-  }
-
-  private checkWebGLSupport(): boolean {
-    try {
-      const canvas = document.createElement('canvas');
-      const gl = canvas.getContext('webgl2') || canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-      return !!gl;
-    } catch {
-      return false;
-    }
-  }
-
-  private checkWasmSupport(): boolean {
-    try {
-      return typeof WebAssembly !== 'undefined' && typeof WebAssembly.instantiate === 'function';
-    } catch {
-      return false;
-    }
-  }
-
   getDiagnosticsAttemptsSummary(): string {
     if (!this.diagnostics || !this.diagnostics.attempts || this.diagnostics.attempts.length === 0) {
       return '';
@@ -140,6 +117,7 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
   async ngOnInit() {
     await this.loadModel();
     this.initDetectionWorker();
+    this.initDecodeWorker();
   }
 
   ngOnDestroy() {
@@ -147,6 +125,10 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
     if (this.detectionWorker) {
       this.detectionWorker.terminate();
       this.detectionWorker = null;
+    }
+    if (this.decodeWorker) {
+      this.decodeWorker.terminate();
+      this.decodeWorker = null;
     }
   }
 
@@ -163,16 +145,13 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
       } else {
         // Get base path (handles baseHref in production)
         const basePath = this.getBasePath();
-        this.debugLog('Base path:', basePath);
         
         const modelVersion = '2026-01-28-1';
 
         // Try different possible paths for the ONNX model
         const possiblePaths = [
           `${basePath}assets/models/yolotiny.onnx?v=${modelVersion}`,
-          `${basePath}assets/yolotiny.onnx?v=${modelVersion}`,
-          `/assets/models/yolotiny.onnx?v=${modelVersion}`, // Fallback for dev
-          `/assets/yolotiny.onnx?v=${modelVersion}`
+          `/assets/models/yolotiny.onnx?v=${modelVersion}`
         ];
 
         let lastError: any = null;
@@ -220,13 +199,10 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
         for (const modelPath of candidatePaths) {
           try {
             pathsAttempted++;
-            this.debugLog(`[${pathsAttempted}/${candidatePaths.length}] Trying to load model from: ${modelPath}`);
             await detectorService.loadModel(modelPath);
-            this.debugLog(`✅ Successfully loaded model from: ${modelPath}`);
             break;
           } catch (pathError) {
             const errorMsg = (pathError as Error).message;
-            console.warn(`❌ Failed to load from ${modelPath}:`, errorMsg);
             lastError = pathError;
             // Continue to next path
           }
@@ -257,7 +233,6 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
       
       this.isModelLoading = false;
       this.diagnostics = this.onnxDetectorService.getLastDiagnostics();
-      console.error('Model loading error:', err);
     }
   }
 
@@ -279,7 +254,6 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
         if (type === 'error') {
           this.workerBusy = false;
           this.detectionInFlight = false;
-          console.error('Worker detection error:', error);
           return;
         }
         if (type === 'result') {
@@ -292,25 +266,23 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
         this.detectionWorker.postMessage({
           type: 'config',
           payload: {
-            inputSize: 160,
-            confThreshold: 0.1,
+            inputSize: 160,            confThreshold: 0.1,
             iouThreshold: 0.45
           }
         });
         this.detectionWorker.postMessage({ type: 'load', payload: { modelUrl } });
       }
     } catch (err) {
-      console.error('Failed to init detection worker:', err);
+      // Worker initialization failed
     }
   }
 
 
   private async getUserMediaWithFallbacks(): Promise<MediaStream> {
     const frameRate = { ideal: 30, min: 20 };
-    const constraintSets: MediaStreamConstraints[] = [];
-
-    if (this.cameraResolution === 'fhd') {
-      constraintSets.push({
+    // Basic constraints only (allowed in getUserMedia)
+    const constraintSets: MediaStreamConstraints[] = [
+      {
         video: {
           facingMode: { ideal: 'environment' },
           width: { ideal: 1920 },
@@ -318,28 +290,7 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
           frameRate
         },
         audio: false
-      });
-    } else if (this.cameraResolution === 'hd') {
-      constraintSets.push({
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          frameRate
-        },
-        audio: false
-      });
-    } else {
-      constraintSets.push({
-        video: {
-          facingMode: { ideal: 'environment' },
-          frameRate
-        },
-        audio: false
-      });
-    }
-
-    constraintSets.push(
+      },
       {
         video: { facingMode: { ideal: 'environment' } },
         audio: false
@@ -348,7 +299,7 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
         video: true,
         audio: false
       }
-    );
+    ];
 
     let lastError: any = null;
 
@@ -357,7 +308,7 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
         return await navigator.mediaDevices.getUserMedia(constraints);
       } catch (err) {
         lastError = err;
-        console.warn('getUserMedia failed with constraints:', constraints, err);
+        // Try next constraint set
       }
     }
 
@@ -415,36 +366,21 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
       try {
         await video.play();
       } catch (playError) {
-        console.warn('Autoplay prevented, waiting for metadata:', playError);
+        // Autoplay prevented, will wait for metadata
       }
 
       await this.waitForVideoReady(video);
 
       const videoTrack = this.stream.getVideoTracks()[0];
-      const capabilities = videoTrack?.getCapabilities?.() as any;
-      if (capabilities) {
-        const advanced: any = {};
-        if (capabilities.focusMode?.includes('auto')) {
-          advanced.focusMode = 'auto';
-        }
-        if (capabilities.exposureMode?.includes('continuous')) {
-          advanced.exposureMode = 'continuous';
-        }
-        if (capabilities.whiteBalanceMode?.includes('continuous')) {
-          advanced.whiteBalanceMode = 'continuous';
-        }
-
-        if (Object.keys(advanced).length > 0) {
-          try {
-            await videoTrack.applyConstraints({ advanced: [advanced] });
-          } catch (constraintError) {
-            console.warn('Failed to apply camera constraints:', constraintError);
-          }
-        }
-      }
+      await this.applyAdvancedCameraControls(videoTrack);
 
       this.isStreaming = true;
       this.currentResolution = `${video.videoWidth}x${video.videoHeight}`;
+
+      // Reset decode history for new session
+      this.recentDecodeHistory = [];
+      this.decodedText = '';
+      this.decodedFormat = '';
 
       // Initialize FPS tracking
       this.lastVideoTime = 0;
@@ -460,9 +396,66 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
       this.startDetectionLoop();
     } catch (err) {
       this.error = 'Failed to access camera: ' + (err as Error).message;
-      console.error(err);
+      // Camera access failed
     }
   }
+
+  private initDecodeWorker() {
+    if (typeof Worker === 'undefined') {
+      return;
+    }
+    try {
+      this.decodeWorker = new Worker(
+        new URL('../workers/decode.worker', import.meta.url),
+        { type: 'module' }
+      );
+      this.decodeWorker.onmessage = (event) => {
+        const { type, id, text, format, error } = event.data || {};
+        if (type === 'error') {
+          this.decodeWorkerBusy = false;
+          return;
+        }
+        if (type === 'result') {
+          this.decodeWorkerBusy = false;
+          if (text) {
+            this.applyDecodeResult(text, format);
+          }
+        }
+      };
+      this.decodeWorkerReady = true;
+    } catch (err) {
+      // Decode worker initialization failed
+    }
+  }
+
+  private async applyAdvancedCameraControls(track: MediaStreamTrack | undefined) {
+    if (!track) return;
+    const supported = navigator.mediaDevices.getSupportedConstraints?.() || {};
+    const supportedAny = supported as any;
+    const capabilities = track.getCapabilities?.() as any;
+    if (!capabilities) return;
+
+    const advanced: any = {};
+
+    if (supportedAny.focusMode && Array.isArray(capabilities.focusMode) && capabilities.focusMode.includes('auto')) {
+      advanced.focusMode = 'auto';
+    }
+    if (supportedAny.exposureMode && Array.isArray(capabilities.exposureMode) && capabilities.exposureMode.includes('continuous')) {
+      advanced.exposureMode = 'continuous';
+    }
+    if (supportedAny.whiteBalanceMode && Array.isArray(capabilities.whiteBalanceMode) && capabilities.whiteBalanceMode.includes('continuous')) {
+      advanced.whiteBalanceMode = 'continuous';
+    }
+
+    if (Object.keys(advanced).length === 0) return;
+
+    try {
+      await track.applyConstraints({ advanced: [advanced] });
+    } catch (constraintError) {
+      // Advanced camera controls not supported
+    }
+  }
+
 
   stopCamera() {
     if (this.animationFrameId) {
@@ -489,6 +482,12 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
     
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
+
+    this.detectionCanvas.width = video.videoWidth;
+    this.detectionCanvas.height = video.videoHeight;
+    if (!this.detectionCtx) {
+      this.detectionCtx = this.detectionCanvas.getContext('2d', { willReadFrequently: true });
+    }
   }
 
   private startStreamRendering() {
@@ -508,30 +507,28 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
         return;
       }
 
-      const video = this.videoElement.nativeElement;
       const canvas = this.canvasElement.nativeElement;
-      const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
-
-      // Draw video frame directly (no clear needed - drawImage overwrites)
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const ctx = canvas.getContext('2d')!;
 
       // Only redraw detections if they changed
       if (this.detectionsChanged()) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
         this.redrawDetectionOverlay(canvas);
-      }
-      
-      // Draw cached overlay (very fast - just one drawImage)
-      if (this.overlayCanvas) {
-        ctx.drawImage(this.overlayCanvas, 0, 0);
       }
 
       // Update render time
       lastRenderTime = currentTime;
 
-      // Update FPS (run inside Angular zone for UI updates)
-      this.ngZone.run(() => {
-        this.updateFPS();
-      });
+      // Count frames every render
+      this.frameCount++;
+
+      // Update FPS (run inside Angular zone for UI updates) every 500ms
+      if (currentTime - this.lastFpsUiUpdate >= 500) {
+        this.lastFpsUiUpdate = currentTime;
+        this.ngZone.run(() => {
+          this.updateFPS();
+        });
+      }
 
       this.animationFrameId = requestAnimationFrame(renderFrame);
     };
@@ -541,20 +538,27 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
   }
 
   private startDetectionLoop() {
-    // Run detection every 300ms
+    // Run detection every 500ms
     this.detectionIntervalId = setInterval(async () => {
       if (!this.isStreaming) return;
       if (this.detectionInFlight) return;
 
       await this.runDetectionCycle();
-    }, 300);
+    }, 500);
   }
 
   private async runDetectionCycle() {
     this.detectionInFlight = true;
-    const video = this.videoElement.nativeElement;
     const canvas = this.canvasElement.nativeElement;
-    const ctx = canvas.getContext('2d')!;
+    const video = this.videoElement.nativeElement;
+    const detectionCtx = this.detectionCtx;
+    if (!detectionCtx) {
+      this.detectionInFlight = false;
+      return;
+    }
+
+    // Draw current frame into detection canvas (offscreen)
+    detectionCtx.drawImage(video, 0, 0, this.detectionCanvas.width, this.detectionCanvas.height);
 
     const roiX = Math.round(canvas.width * this.roi.left);
     const roiY = Math.round(canvas.height * this.roi.top);
@@ -562,7 +566,7 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
     const roiHeight = Math.round(canvas.height * (1 - this.roi.top - this.roi.bottom));
 
     // Get image data for detection (ROI only)
-    const imageData = ctx.getImageData(roiX, roiY, roiWidth, roiHeight);
+    const imageData = detectionCtx.getImageData(roiX, roiY, roiWidth, roiHeight);
 
     // Run detection
     try {
@@ -602,7 +606,7 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
       const displayDetections = topDetection ? [topDetection] : [];
       this.detectionCount = displayDetections.length;
 
-      await this.decodeBarcodes(canvas, displayDetections);
+      await this.decodeBarcodes(this.detectionCanvas, displayDetections);
       const now = performance.now();
       if (this.decodedText && now - this.lastDecodedAt > this.decodedStaleMs) {
         this.decodedText = '';
@@ -623,11 +627,9 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
       // Cache detection overlay for rendering loop
       this.cacheDetectionOverlay(canvas, displayDetections);
       
-      if (displayDetections.length > 0 && this.frameCount % 30 === 0) {
-        this.debugLog(`ðŸ“Š Frame detection: ${displayDetections.length} barcodes`);
-      }
+      // Debug info every 30 frames
     } catch (err) {
-      console.error('Detection error:', err);
+      // Detection failed
     } finally {
       this.detectionInFlight = false;
     }
@@ -657,7 +659,7 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
     this.detectionCount = displayDetections.length;
 
     if (displayDetections.length > 0) {
-      await this.decodeBarcodes(canvas, displayDetections);
+      await this.decodeBarcodes(this.detectionCanvas, displayDetections);
     }
 
     const now = performance.now();
@@ -700,24 +702,53 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
         const [x, y, width, height] = detection.bbox;
         if (width < 10 || height < 10) continue;
 
-        if (this.preprocessEnabled) {
-          const scale = 1.3;
-          tempCanvas.width = Math.max(1, Math.round(width * scale));
-          tempCanvas.height = Math.max(1, Math.round(height * scale));
-        } else {
-          tempCanvas.width = Math.max(1, Math.round(width));
-          tempCanvas.height = Math.max(1, Math.round(height));
-        }
+        const padX = width * 0.15;
+        const padY = height * 0.15;
+        const cropX = Math.max(0, Math.floor(x - padX));
+        const cropY = Math.max(0, Math.floor(y - padY));
+        const cropW = Math.min(canvas.width - cropX, Math.ceil(width + padX * 2));
+        const cropH = Math.min(canvas.height - cropY, Math.ceil(height + padY * 2));
+
+        if (cropW < 2 || cropH < 2) continue;
+
+        tempCanvas.width = Math.max(1, Math.round(cropW));
+        tempCanvas.height = Math.max(1, Math.round(cropH));
         tempCtx.clearRect(0, 0, tempCanvas.width, tempCanvas.height);
-        tempCtx.drawImage(canvas, x, y, width, height, 0, 0, tempCanvas.width, tempCanvas.height);
-        if (this.preprocessEnabled) {
-          this.preprocessForZXing(tempCtx, tempCanvas.width, tempCanvas.height);
-        }
+        tempCtx.drawImage(canvas, cropX, cropY, cropW, cropH, 0, 0, tempCanvas.width, tempCanvas.height);
 
         try {
-          const result = await this.zxingReader.decodeFromCanvas(tempCanvas);
-          this.applyDecodeResult(result);
-          break;
+          const imageData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+          const data = imageData.data;
+          for (let i = 0; i < data.length; i += 4) {
+            const r = data[i];
+            const g = data[i + 1];
+            const b = data[i + 2];
+            const gray = (0.299 * r + 0.587 * g + 0.114 * b) | 0;
+            data[i] = gray;
+            data[i + 1] = gray;
+            data[i + 2] = gray;
+          }
+          tempCtx.putImageData(imageData, 0, 0);
+
+          if (!this.decodeWorkerReady || !this.decodeWorker || this.decodeWorkerBusy) {
+            return;
+          }
+
+          this.decodeWorkerBusy = true;
+          const id = ++this.decodeWorkerRequestId;
+          this.decodeWorker.postMessage(
+            {
+              type: 'decode',
+              payload: {
+                id,
+                width: imageData.width,
+                height: imageData.height,
+                buffer: imageData.data.buffer
+              }
+            },
+            [imageData.data.buffer]
+          );
+          return;
         } catch (err) {
           // Ignore decode failures for this region
         }
@@ -727,59 +758,67 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
     }
   }
 
-  private preprocessForZXing(ctx: CanvasRenderingContext2D, width: number, height: number) {
-    const imageData = ctx.getImageData(0, 0, width, height);
-    const data = imageData.data;
-    const contrast = 1.1;
-    const threshold = 130;
-
-    for (let i = 0; i < data.length; i += 4) {
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      const gray = 0.299 * r + 0.587 * g + 0.114 * b;
-      const adjusted = (gray - 128) * contrast + 128;
-      const value = adjusted > threshold ? 255 : 0;
-      data[i] = value;
-      data[i + 1] = value;
-      data[i + 2] = value;
-    }
-
-    ctx.putImageData(imageData, 0, 0);
-  }
-
-  onCameraResolutionChange() {
-    if (this.isStreaming) {
-      this.stopCamera();
-      this.startCamera();
-    }
-  }
-
-  private applyDecodeResult(result: any) {
-    const text = result.getText();
+  private applyDecodeResult(text: string, format: string) {
     if (!text) return;
-    const format = String(result.getBarcodeFormat());
     const time = new Date().toLocaleTimeString();
 
-    if (this.decodedHistory.length > 0 && this.decodedHistory[0].text === text) {
+    // Update recent decode history
+    this.recentDecodeHistory.push(text);
+    if (this.recentDecodeHistory.length > this.maxHistorySize) {
+      this.recentDecodeHistory.shift(); // Remove oldest
+    }
+
+    // Check success conditions:
+    // 1. At least 2 consecutive same results, OR
+    // 2. At least 2 same results in the last 5 decodes
+    let isSuccess = false;
+    let successText = '';
+
+    // Check for 2 consecutive same results
+    if (this.recentDecodeHistory.length >= 2) {
+      const lastTwo = this.recentDecodeHistory.slice(-2);
+      if (lastTwo[0] === lastTwo[1]) {
+        isSuccess = true;
+        successText = lastTwo[0];
+      }
+    }
+
+    // If not consecutive, check for 2+ same results in last 5
+    if (!isSuccess && this.recentDecodeHistory.length >= 2) {
+      const counts = new Map<string, number>();
+      for (const result of this.recentDecodeHistory) {
+        counts.set(result, (counts.get(result) || 0) + 1);
+      }
+      
+      for (const [result, count] of counts) {
+        if (count >= 2) {
+          isSuccess = true;
+          successText = result;
+          break;
+        }
+      }
+    }
+
+    if (isSuccess && !this.showDecodePopup) {
+      // Success! Stop camera and show popup
+      this.finalDecodedText = successText;
+      this.finalDecodedFormat = String(format);
+      this.showDecodePopup = true;
+      this.stopCamera();
       return;
     }
 
     this.decodedText = text;
-    this.decodedFormat = format;
+    this.decodedFormat = String(format);
     this.decodedHistory = [{ text, format, time }, ...this.decodedHistory].slice(0, 5);
     this.lastDecodedAt = performance.now();
   }
 
   private drawDetections(ctx: CanvasRenderingContext2D, detections: Detection[]) {
     if (detections.length === 0) return;
-    
-    this.debugLog(`ðŸŽ¨ Drawing ${detections.length} detections`);
-    
+
     detections.forEach((detection, index) => {
       const [x, y, width, height] = detection.bbox;
-      
-      this.debugLog(`Drawing box ${index + 1}:`, { x: x.toFixed(1), y: y.toFixed(1), width: width.toFixed(1), height: height.toFixed(1) });
       
       // Draw bounding box with thick green line
       ctx.strokeStyle = '#00FF00';
@@ -880,7 +919,6 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
 
   private updateFPS() {
     const now = performance.now();
-    this.frameCount++;
 
     // Update render/detection FPS
     if (now - this.fpsUpdateTime >= 1000) {
@@ -917,8 +955,6 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
     if (!this.overlayCanvas) return;
     
     const ctx = canvas.getContext('2d')!;
-    // Clear previous overlay area
-    // Draw cached overlay
     ctx.drawImage(this.overlayCanvas, 0, 0);
     this.overlayDirty = false;
   }
@@ -943,7 +979,6 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
   }
 
   toggleDetector() {
-    this.debugLog('Switching detector mode:', this.useMockDetector ? 'Mock' : 'ONNX');
     // Reload model with new detector
     this.modelLoaded = false;
     this.loadModel();
@@ -955,6 +990,15 @@ export class BarcodeDetectorComponent implements OnInit, OnDestroy {
     } else {
       this.startCamera();
     }
+  }
+
+  onDecodeDone() {
+    this.showDecodePopup = false;
+    this.finalDecodedText = '';
+    this.finalDecodedFormat = '';
+    this.recentDecodeHistory = []; // Reset history
+    // Camera will restart automatically since we're not streaming anymore
+    this.startCamera();
   }
 }
 

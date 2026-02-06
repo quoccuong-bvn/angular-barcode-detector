@@ -1,48 +1,19 @@
-<div class="detector-container">
-  <div class="header">
+<div class="detector-container" [class.streaming]="isStreaming">
+  <div class="header" *ngIf="!isStreaming">
     <h1>Barcode Detector</h1>
-    <div class="status">
-      <span *ngIf="isModelLoading" class="loading">Loading {{ useMockDetector ? 'Mock' : 'ONNX' }} model...</span>
-      <span *ngIf="modelLoaded && !isModelLoading" class="ready">{{ useMockDetector ? 'Mock' : 'ONNX' }} Model ready</span>
-      <span *ngIf="error" class="error">{{ error }}</span>
-    </div>
-    <div class="status">
-      <span>COOP/COEP: <strong>{{ crossOriginIsolated ? 'Enabled' : 'Disabled' }}</strong></span>
-      <span>WebGL: <strong>{{ webglSupported ? 'Available' : 'Unavailable' }}</strong></span>
-      <span>WASM: <strong>{{ wasmSupported ? 'Available' : 'Unavailable' }}</strong></span>
-    </div>
-    <div class="status" *ngIf="diagnostics">
-      <span>Model URL: <strong>{{ diagnostics.modelUrl || '-' }}</strong></span>
-      <span>Model size: <strong>{{ diagnostics.modelSizeBytes ? (diagnostics.modelSizeBytes / (1024 * 1024) | number:'1.1-1') + ' MB' : '-' }}</strong></span>
-      <span>Backend used: <strong>{{ diagnostics.backendUsed || '-' }}</strong></span>
-      <span *ngIf="diagnostics.attempts.length > 0">
-        Attempts:
-        <strong>{{ getDiagnosticsAttemptsSummary() }}</strong>
-      </span>
-    </div>
   </div>
 
-  <div class="controls">
+  <div class="info" *ngIf="!isStreaming">
+    <p>Tap "Start Camera" to begin detecting barcodes</p>
+  </div>
+
+  <div class="controls" *ngIf="!isStreaming">
     <button 
       (click)="toggleCamera()" 
       [disabled]="!modelLoaded || isModelLoading"
       [class.stop]="isStreaming">
-      {{ isStreaming ? 'Stop Camera' : 'Start Camera' }}
+      Start Camera
     </button>
-    <div class="control-row">
-      <label class="control-toggle">
-        <input type="checkbox" [(ngModel)]="preprocessEnabled" />
-        Preprocess (resize + threshold)
-      </label>
-      <label class="control-select">
-        Resolution
-        <select [(ngModel)]="cameraResolution" (change)="onCameraResolutionChange()">
-          <option *ngFor="let option of cameraResolutionOptions" [value]="option.value">
-            {{ option.label }}
-          </option>
-        </select>
-      </label>
-    </div>
   </div>
 
   <div class="stats" *ngIf="isStreaming">
@@ -64,7 +35,7 @@
     </div>
   </div>
 
-  <div class="video-container">
+  <div class="video-container" [class.fullscreen]="isStreaming" [class.hidden]="!isStreaming">
     <video 
       #videoElement 
       autoplay 
@@ -76,29 +47,40 @@
       #canvasElement
       [class.hidden]="!isStreaming">
     </canvas>
-    <div class="decoded-overlay" *ngIf="isStreaming && decodedText">
-      <div class="decoded-value">{{ decodedText }}</div>
-      <div class="decoded-meta">Format: {{ decodedFormat }}</div>
+    <div class="fps-overlay" *ngIf="isStreaming">
+      FPS: {{ fps }}
     </div>
+    <button
+      class="stop-button"
+      *ngIf="isStreaming"
+      (click)="toggleCamera()">
+      Stop Camera
+    </button>
     <div class="status-overlay" *ngIf="isStreaming && streamMessage">
       {{ streamMessage }}
-    </div>
-    <div
-      class="roi-overlay"
-      [class.hidden]="!isStreaming"
-      style="--roi-top: 25%; --roi-right: 20%; --roi-bottom: 25%; --roi-left: 20%;"
-      aria-hidden="true">
     </div>
     <div class="center-crosshair" *ngIf="isStreaming" aria-hidden="true">
       <div class="crosshair-line horizontal"></div>
       <div class="crosshair-line vertical"></div>
-      <div class="crosshair-center"></div>
     </div>
   </div>
 
-  <div class="info" *ngIf="!isStreaming && modelLoaded">
-    <p>Click "Start Camera" to begin detecting barcodes</p>
-    <p>The detector will automatically identify and highlight barcodes in real-time</p>
+  <!-- Decode Success Popup -->
+  <div class="decode-popup-overlay" *ngIf="showDecodePopup" (click)="onDecodeDone()">
+    <div class="decode-popup" (click)="$event.stopPropagation()">
+      <div class="decode-popup-header">
+        <h3>Barcode Detected!</h3>
+      </div>
+      <div class="decode-popup-content">
+        <div class="decode-result">
+          <div class="decode-text">{{ finalDecodedText }}</div>
+          <div class="decode-format">Format: {{ finalDecodedFormat }}</div>
+        </div>
+      </div>
+      <div class="decode-popup-actions">
+        <button class="decode-done-btn" (click)="onDecodeDone()">Done</button>
+      </div>
+    </div>
   </div>
 </div>
 

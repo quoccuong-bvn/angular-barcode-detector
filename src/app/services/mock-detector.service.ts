@@ -16,16 +16,13 @@ export class MockDetectorService {
     // Simulate model loading
     setTimeout(() => {
       this.modelLoaded = true;
-      console.log('Mock detector ready');
     }, 1000);
   }
 
   async loadModel(modelPath: string): Promise<void> {
-    console.log('Mock: Loading model from:', modelPath);
     return new Promise((resolve) => {
       setTimeout(() => {
         this.modelLoaded = true;
-        console.log('Mock: Model loaded successfully');
         resolve();
       }, 1500);
     });
@@ -61,7 +58,6 @@ export class MockDetectorService {
       });
     }
 
-    console.log(`Mock: Detected ${detections.length} barcodes`);
     return detections;
   }
 }

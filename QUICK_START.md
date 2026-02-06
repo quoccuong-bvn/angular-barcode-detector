@@ -21,6 +21,18 @@ Project đã được setup hoàn chỉnh và sẵn sàng sử dụng:
 - Accept certificate warning
 - Cấp quyền truy cập camera khi được hỏi
 
+### Cài chứng chỉ iOS (bắt buộc để bật camera)
+
+Để Safari cho phép camera, cần cài và tin cậy chứng chỉ HTTPS.
+
+1. Chép `ssl/localhost.crt` sang iPhone/iPad (AirDrop, Mail, Files).
+2. Mở file `.crt` và cài profile.
+3. Bật tin cậy tại `Cài đặt > Cài đặt chung > Giới thiệu > Cài đặt tin cậy chứng chỉ` và bật chứng chỉ vừa cài.
+4. Mở Safari và truy cập `https://<LAN-IP>:4200`.
+5. Nếu báo sai hostname/IP, tạo lại cert bằng mkcert và nhớ thêm IP LAN.
+
+Lưu ý: nếu chuyển project sang máy khác thì phải tạo và tin cậy cert mới trên máy đó.
+
 ### 2. Sử dụng detector
 
 1. Đợi thông báo "✓ Model ready" (khoảng 2-5 giây)
